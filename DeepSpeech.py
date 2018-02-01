@@ -440,7 +440,7 @@ def BiRNN(batch_x, seq_length, dropout):
     if FLAGS.lstm_type == 'basic':
         outputs = basic_lstm(layer_3, seq_length, dropout)
     elif FLAGS.lstm_type == 'cudnn':
-        pass
+        outputs = cudnn_lstm(layer_3, seq_length, dropout)
     else:
         log_error('Unknown lstm_type %s' % FLAGS.lstm_type)
 
@@ -463,6 +463,29 @@ def BiRNN(batch_x, seq_length, dropout):
 
     # Output shape: [n_steps, batch_size, n_hidden_6]
     return layer_6
+
+def cudnn_lstm(inputs, seq_length, dropout):
+    # TODO: Forget bias?
+    inputs = tf.nn.dropout(inputs, (1.0 - dropout[4]))
+
+    # Note that there is a dropout parameter, but it is "applied between layers
+    # (e.g., a single layer network will have no dropout applied)."
+    # http://docs.nvidia.com/deeplearning/sdk/cudnn-developer-guide/index.html#cudnnSetRNNDescriptor
+    lstm = tf.contrib.cudnn_rnn.CudnnLSTM(num_layers=1,
+                                          num_units=n_cell_dim,
+                                          direction='bidirectional',
+                                          seed=FLAGS.random_seed)
+
+    outputs, output_states  = lstm(inputs,
+                                   training=FLAGS.train)
+
+    outputs = tf.nn.dropout(outputs, (1.0 - dropout[4]))
+
+    # Reshape outputs from two tensors each of shape [n_steps, batch_size, num_dirs (2) * n_cell_dim]
+    # to a single tensor of shape [n_steps*batch_size, 2*n_cell_dim]
+    outputs = tf.reshape(outputs, [-1, 2*n_cell_dim])
+
+    return outputs
 
 def basic_lstm(inputs, seq_length, dropout):
     # Now we create the forward and backward LSTM units.
@@ -499,10 +522,6 @@ def basic_lstm(inputs, seq_length, dropout):
     outputs = tf.reshape(outputs, [-1, 2*n_cell_dim])
 
     return outputs
-
-
-def cudnn_lstm(inputs, batch_size, seq_length, dropout):
-    pass
 
 def decode_with_lm(inputs, sequence_length, beam_width=100,
                    top_paths=1, merge_repeated=True):
