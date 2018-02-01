@@ -124,6 +124,10 @@ tf.app.flags.DEFINE_integer ('summary_secs',     0,           'interval in secon
 
 tf.app.flags.DEFINE_integer ('n_hidden',         2048,        'layer width to use when initialising layers')
 
+# LSTM Implementation
+
+tf.app.flags.DEFINE_string  ('lstm_type',        'basic',     'LSTM implementation to use')
+
 # Initialization
 
 tf.app.flags.DEFINE_integer ('random_seed',      4567,        'default random seed that is used to initialize variables')
@@ -429,42 +433,16 @@ def BiRNN(batch_x, seq_length, dropout):
     layer_3 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(layer_2, h3), b3)), FLAGS.relu_clip)
     layer_3 = tf.nn.dropout(layer_3, (1.0 - dropout[2]))
 
-    # Now we create the forward and backward LSTM units.
-    # Both of which have inputs of length `n_cell_dim` and bias `1.0` for the forget gate of the LSTM.
-
-    # Forward direction cell: (if else required for TF 1.0 and 1.1 compat)
-    lstm_fw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True) \
-                   if 'reuse' not in inspect.getargspec(tf.contrib.rnn.BasicLSTMCell.__init__).args else \
-                   tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
-    lstm_fw_cell = tf.contrib.rnn.DropoutWrapper(lstm_fw_cell,
-                                                input_keep_prob=1.0 - dropout[3],
-                                                output_keep_prob=1.0 - dropout[3],
-                                                seed=FLAGS.random_seed)
-    # Backward direction cell: (if else required for TF 1.0 and 1.1 compat)
-    lstm_bw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True) \
-                   if 'reuse' not in inspect.getargspec(tf.contrib.rnn.BasicLSTMCell.__init__).args else \
-                   tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
-    lstm_bw_cell = tf.contrib.rnn.DropoutWrapper(lstm_bw_cell,
-                                                input_keep_prob=1.0 - dropout[4],
-                                                output_keep_prob=1.0 - dropout[4],
-                                                seed=FLAGS.random_seed)
-
     # `layer_3` is now reshaped into `[n_steps, batch_size, 2*n_cell_dim]`,
     # as the LSTM BRNN expects its input to be of shape `[max_time, batch_size, input_size]`.
     layer_3 = tf.reshape(layer_3, [-1, batch_x_shape[0], n_hidden_3])
 
-    # Now we feed `layer_3` into the LSTM BRNN cell and obtain the LSTM BRNN output.
-    outputs, output_states = tf.nn.bidirectional_dynamic_rnn(cell_fw=lstm_fw_cell,
-                                                             cell_bw=lstm_bw_cell,
-                                                             inputs=layer_3,
-                                                             dtype=tf.float32,
-                                                             time_major=True,
-                                                             sequence_length=seq_length)
-
-    # Reshape outputs from two tensors each of shape [n_steps, batch_size, n_cell_dim]
-    # to a single tensor of shape [n_steps*batch_size, 2*n_cell_dim]
-    outputs = tf.concat(outputs, 2)
-    outputs = tf.reshape(outputs, [-1, 2*n_cell_dim])
+    if FLAGS.lstm_type == 'basic':
+        outputs = basic_lstm(layer_3, seq_length, dropout)
+    elif FLAGS.lstm_type == 'cudnn':
+        pass
+    else:
+        log_error('Unknown lstm_type %s' % FLAGS.lstm_type)
 
     # Now we feed `outputs` to the fifth hidden layer with clipped RELU activation and dropout
     b5 = variable_on_worker_level('b5', [n_hidden_5], tf.random_normal_initializer(stddev=FLAGS.b5_stddev))
@@ -485,6 +463,46 @@ def BiRNN(batch_x, seq_length, dropout):
 
     # Output shape: [n_steps, batch_size, n_hidden_6]
     return layer_6
+
+def basic_lstm(inputs, seq_length, dropout):
+    # Now we create the forward and backward LSTM units.
+    # Both of which have inputs of length `n_cell_dim` and bias `1.0` for the forget gate of the LSTM.
+
+    # Forward direction cell: (if else required for TF 1.0 and 1.1 compat)
+    lstm_fw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True) \
+                   if 'reuse' not in inspect.getargspec(tf.contrib.rnn.BasicLSTMCell.__init__).args else \
+                   tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
+    lstm_fw_cell = tf.contrib.rnn.DropoutWrapper(lstm_fw_cell,
+                                                 input_keep_prob=1.0 - dropout[3],
+                                                 output_keep_prob=1.0 - dropout[3],
+                                                 seed=FLAGS.random_seed)
+    # Backward direction cell: (if else required for TF 1.0 and 1.1 compat)
+    lstm_bw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True) \
+                   if 'reuse' not in inspect.getargspec(tf.contrib.rnn.BasicLSTMCell.__init__).args else \
+                   tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
+    lstm_bw_cell = tf.contrib.rnn.DropoutWrapper(lstm_bw_cell,
+                                                 input_keep_prob=1.0 - dropout[4],
+                                                 output_keep_prob=1.0 - dropout[4],
+                                                 seed=FLAGS.random_seed)
+
+    # Now we feed `layer_3` into the LSTM BRNN cell and obtain the LSTM BRNN output.
+    outputs, output_states = tf.nn.bidirectional_dynamic_rnn(cell_fw=lstm_fw_cell,
+                                                             cell_bw=lstm_bw_cell,
+                                                             inputs=inputs,
+                                                             dtype=tf.float32,
+                                                             time_major=True,
+                                                             sequence_length=seq_length)
+
+    # Reshape outputs from two tensors each of shape [n_steps, batch_size, n_cell_dim]
+    # to a single tensor of shape [n_steps*batch_size, 2*n_cell_dim]
+    outputs = tf.concat(outputs, 2)
+    outputs = tf.reshape(outputs, [-1, 2*n_cell_dim])
+
+    return outputs
+
+
+def cudnn_lstm(inputs, batch_size, seq_length, dropout):
+    pass
 
 def decode_with_lm(inputs, sequence_length, beam_width=100,
                    top_paths=1, merge_repeated=True):
