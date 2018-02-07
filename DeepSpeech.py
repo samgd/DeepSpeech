@@ -387,6 +387,8 @@ def float32_variable_storage_getter(getter, name, shape=None, dtype=None,
     float32 precision and then casts them to training precision.
     '''
     storage_dtype = tf.float32 if trainable else dtype
+    if type(initializer).__name__ == 'Tensor' and initializer.dtype != storage_dtype:
+        initializer = tf.cast(initializer, storage_dtype)
     variable = getter(name, shape, dtype=storage_dtype,
                       initializer=initializer, regularizer=regularizer,
                       trainable=trainable, *args, **kwargs)
@@ -501,10 +503,16 @@ def cudnn_lstm(inputs, seq_length, dropout):
     lstm = tf.contrib.cudnn_rnn.CudnnLSTM(num_layers=1,
                                           num_units=n_cell_dim,
                                           direction='bidirectional',
-                                          seed=FLAGS.random_seed)
+                                          seed=FLAGS.random_seed,
+                                          dtype=precision)
+    lstm.build(inputs.get_shape())
+    lstm._trainable_weights = [v for v in tf.global_variables() if v.name == 'fp32_storage/cudnn_lstm/opaque_kernel:0']
+    tf.get_collection_ref(tf.GraphKeys.SAVEABLE_OBJECTS).remove(lstm._saveable)
+    lstm._saveable = None
+    lstm._create_saveable()
 
-    outputs, output_states  = lstm(inputs,
-                                   training=FLAGS.train)
+    outputs, output_states = lstm(inputs,
+                                  training=FLAGS.train)
 
     outputs = tf.nn.dropout(outputs, (1.0 - dropout[4]))
 
@@ -530,6 +538,7 @@ def basic_lstm(inputs, seq_length, dropout):
     lstm_bw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True) \
                    if 'reuse' not in inspect.getargspec(tf.contrib.rnn.BasicLSTMCell.__init__).args else \
                    tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
+    bw_cell = lstm_bw_cell
     lstm_bw_cell = tf.contrib.rnn.DropoutWrapper(lstm_bw_cell,
                                                  input_keep_prob=1.0 - dropout[4],
                                                  output_keep_prob=1.0 - dropout[4],
