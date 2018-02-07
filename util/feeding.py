@@ -24,7 +24,8 @@ class ModelFeeder(object):
                  numcontext,
                  alphabet,
                  tower_feeder_count=-1,
-                 threads_per_queue=2):
+                 threads_per_queue=2,
+                 dtype=tf.float32):
 
         self.train = train_set
         self.dev = dev_set
@@ -35,14 +36,14 @@ class ModelFeeder(object):
         self.tower_feeder_count = max(len(get_available_gpus()), 1) if tower_feeder_count < 0 else tower_feeder_count
         self.threads_per_queue = threads_per_queue
 
-        self.ph_x = tf.placeholder(tf.float32, [None, numcep + (2 * numcep * numcontext)])
+        self.ph_x = tf.placeholder(dtype, [None, numcep + (2 * numcep * numcontext)])
         self.ph_x_length = tf.placeholder(tf.int32, [])
         self.ph_y = tf.placeholder(tf.int32, [None,])
         self.ph_y_length = tf.placeholder(tf.int32, [])
         self.ph_batch_size = tf.placeholder(tf.int32, [])
         self.ph_queue_selector = tf.placeholder(tf.int32, name='Queue_Selector')
 
-        self._tower_feeders = [_TowerFeeder(self, i, alphabet) for i in range(self.tower_feeder_count)]
+        self._tower_feeders = [_TowerFeeder(self, i, alphabet, dtype) for i in range(self.tower_feeder_count)]
 
     def start_queue_threads(self, session, coord):
         '''
@@ -106,11 +107,11 @@ class _DataSetLoader(object):
     Keeps a ModelFeeder reference for accessing shared settings and placeholders.
     Keeps a DataSet reference to access its samples.
     '''
-    def __init__(self, model_feeder, data_set, alphabet):
+    def __init__(self, model_feeder, data_set, alphabet, dtype=tf.float32):
         self._model_feeder = model_feeder
         self._data_set = data_set
         self.queue = tf.PaddingFIFOQueue(shapes=[[None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [], [None,], []],
-                                                  dtypes=[tf.float32, tf.int32, tf.int32, tf.int32],
+                                                  dtypes=[dtype, tf.int32, tf.int32, tf.int32],
                                                   capacity=data_set.batch_size * 2)
         self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_y_length])
         self._close_op = self.queue.close(cancel_pending_enqueues=True)
@@ -163,10 +164,10 @@ class _TowerFeeder(object):
     It creates, owns and combines three _DataSetLoader instances.
     Keeps a ModelFeeder reference for accessing shared settings and placeholders.
     '''
-    def __init__(self, model_feeder, index, alphabet):
+    def __init__(self, model_feeder, index, alphabet, dtype=tf.float32):
         self._model_feeder = model_feeder
         self.index = index
-        self._loaders = [_DataSetLoader(model_feeder, data_set, alphabet) for data_set in model_feeder.sets]
+        self._loaders = [_DataSetLoader(model_feeder, data_set, alphabet, dtype) for data_set in model_feeder.sets]
         self._queues = [set_queue.queue for set_queue in self._loaders]
         self._queue = tf.QueueBase.from_list(model_feeder.ph_queue_selector, self._queues)
         self._close_op = self._queue.close(cancel_pending_enqueues=True)

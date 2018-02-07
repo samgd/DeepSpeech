@@ -70,6 +70,9 @@ tf.app.flags.DEFINE_float   ('dropout_rate6',    -1.0,        'dropout rate for 
 
 tf.app.flags.DEFINE_float   ('relu_clip',        20.0,        'ReLU clipping value for non-recurrant layers')
 
+tf.app.flags.DEFINE_boolean ('half_precision',   False,       'use half-precision floating point when training')
+tf.app.flags.DEFINE_integer ('loss_scale',       1,           'loss scaling value to prevent fp16 underflow')
+
 # Adam optimizer (http://arxiv.org/abs/1412.6980) parameters
 
 tf.app.flags.DEFINE_float   ('beta1',            0.9,         'beta 1 parameter of Adam optimizer')
@@ -160,9 +163,10 @@ tf.app.flags.DEFINE_float   ('valid_word_count_weight', 1.00, 'valid word insert
 
 tf.app.flags.DEFINE_string  ('one_shot_infer',       '',       'one-shot inference mode: specify a wav file and the script will load the checkpoint and perform inference on it. Disables training, testing and exporting.')
 
-# Initialize from frozen model
+# Initialize from frozen model or checkpoint
 
 tf.app.flags.DEFINE_string  ('initialize_from_frozen_model', '', 'path to frozen model to initialize from. This behaves like a checkpoint, loading the weights from the frozen model and starting training with those weights. The optimizer parameters aren\'t restored, so remember to adjust the learning rate.')
+tf.app.flags.DEFINE_string  ('initialize_from_checkpoint',   '', 'path to checkpoint to initialize from.')
 
 for var in ['b1', 'h1', 'b2', 'h2', 'b3', 'h3', 'b5', 'h5', 'b6', 'h6']:
     tf.app.flags.DEFINE_float('%s_stddev' % var, None, 'standard deviation to use when initialising %s' % var)
@@ -232,6 +236,13 @@ def initialize_globals():
 
     global no_dropout
     no_dropout = [ 0.0 ] * 6
+
+    # Set precision
+    global precision
+    precision = tf.float16 if FLAGS.half_precision else tf.float32
+
+    if FLAGS.half_precision and FLAGS.loss_scale == 1:
+        log_warn('Parameter --loss_scale is 1 when using --half_precision')
 
     # Set default checkpoint dir
     if len(FLAGS.checkpoint_dir) == 0:
@@ -367,6 +378,22 @@ def log_error(message):
 
 # Graph Creation
 # ==============
+
+def float32_variable_storage_getter(getter, name, shape=None, dtype=None,
+                                    initializer=None, regularizer=None,
+                                    trainable=True, *args, **kwargs):
+    r'''
+    Custom variable getter that forces trainable variables to be stored in
+    float32 precision and then casts them to training precision.
+    '''
+    storage_dtype = tf.float32 if trainable else dtype
+    variable = getter(name, shape, dtype=storage_dtype,
+                      initializer=initializer, regularizer=regularizer,
+                      trainable=trainable, *args, **kwargs)
+    if trainable and dtype != tf.float32:
+        variable = tf.cast(variable, dtype)
+    return variable
+
 
 def variable_on_worker_level(name, shape, initializer):
     r'''
@@ -512,7 +539,7 @@ def basic_lstm(inputs, seq_length, dropout):
     outputs, output_states = tf.nn.bidirectional_dynamic_rnn(cell_fw=lstm_fw_cell,
                                                              cell_bw=lstm_bw_cell,
                                                              inputs=inputs,
-                                                             dtype=tf.float32,
+                                                             dtype=precision,
                                                              time_major=True,
                                                              sequence_length=seq_length)
 
@@ -559,7 +586,11 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout):
     batch_x, batch_seq_len, batch_y = model_feeder.next_batch(tower)
 
     # Calculate the logits of the batch using BiRNN
-    logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout)
+    with tf.variable_scope('fp32_storage',
+                           dtype=precision,
+                           custom_getter=float32_variable_storage_getter):
+        logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout)
+    logits = tf.cast(logits, tf.float32)
 
     # Compute the CTC loss using either TensorFlow's `ctc_loss` or Baidu's `warp_ctc_loss`.
     if FLAGS.use_warpctc:
@@ -696,7 +727,8 @@ def get_tower_results(model_feeder, optimizer):
                     tower_total_losses.append(total_loss)
 
                     # Compute gradients for model parameters using tower's mini-batch
-                    gradients = optimizer.compute_gradients(avg_loss)
+                    # Apply loss-scaling to improve numerical stability
+                    gradients = optimizer.compute_gradients(FLAGS.loss_scale * avg_loss)
 
                     # Retain tower's gradients
                     tower_gradients.append(gradients)
@@ -737,9 +769,9 @@ def average_gradients(tower_gradients):
                 # Append on a 'tower' dimension which we will average over below.
                 grads.append(expanded_g)
 
-            # Average over the 'tower' dimension
+            # Average over the 'tower' dimension and apply loss-scaling correction
             grad = tf.concat(grads, 0)
-            grad = tf.reduce_mean(grad, 0)
+            grad = tf.reduce_mean(grad, 0) / FLAGS.loss_scale
 
             # Create a gradient/variable tuple for the current variable with its average gradient
             grad_and_var = (grad, grad_and_vars[0][1])
@@ -1527,7 +1559,8 @@ def train(server=None):
                                n_input,
                                n_context,
                                alphabet,
-                               tower_feeder_count=len(available_devices))
+                               tower_feeder_count=len(available_devices),
+                               dtype=precision)
 
     # Create the optimizer
     optimizer = create_optimizer()
@@ -1612,6 +1645,12 @@ def train(server=None):
 
         init_from_frozen_model_op = tf.group(*assign_ops)
 
+    def get_session(sess):
+        session = sess
+        while type(session).__name__ != 'Session':
+            session = session._sess
+        return session
+
     # The MonitoredTrainingSession takes care of session initialization,
     # restoring from a checkpoint, saving to a checkpoint, and closing when done
     # or an error occurs.
@@ -1627,6 +1666,12 @@ def train(server=None):
                 feed_dict = {}
                 model_feeder.set_data_set(feed_dict, model_feeder.train)
                 session.run(init_from_frozen_model_op, feed_dict=feed_dict)
+
+            if len(FLAGS.initialize_from_checkpoint) > 0:
+                log_info('Initializing from checkpoint: {}'.format(FLAGS.initialize_from_checkpoint))
+                if len(FLAGS.initialize_from_frozen_model) > 0:
+                    log_warn('Frozen model initialization will be overwritten.')
+                saver.restore(get_session(session), FLAGS.initialize_from_checkpoint)
 
             try:
                 if is_chief:
@@ -1724,7 +1769,7 @@ def train(server=None):
 
 def create_inference_graph(batch_size=None, output_is_logits=False, use_new_decoder=False):
     # Input tensor will be of shape [batch_size, n_steps, n_input + 2*n_input*n_context]
-    input_tensor = tf.placeholder(tf.float32, [batch_size, None, n_input + 2*n_input*n_context], name='input_node')
+    input_tensor = tf.placeholder(precision, [batch_size, None, n_input + 2*n_input*n_context], name='input_node')
     seq_length = tf.placeholder(tf.int32, [batch_size], name='input_lengths')
 
     # Calculate the logits of the batch using BiRNN
