@@ -388,12 +388,13 @@ def float32_variable_storage_getter(getter, name, shape=None, dtype=None,
     '''
     storage_dtype = tf.float32 if trainable else dtype
     if type(initializer).__name__ == 'Tensor' and initializer.dtype != storage_dtype:
-        initializer = tf.cast(initializer, storage_dtype)
+        initializer = tf.cast(initializer, storage_dtype, name='mixed_precision_initializer')
     variable = getter(name, shape, dtype=storage_dtype,
                       initializer=initializer, regularizer=regularizer,
                       trainable=trainable, *args, **kwargs)
     if trainable and dtype != tf.float32:
-        variable = tf.cast(variable, dtype)
+        with tf.device(cpu_device):
+            variable = tf.cast(variable, dtype, name='mixed_precision_cast')
     return variable
 
 
