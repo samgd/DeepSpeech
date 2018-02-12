@@ -18,6 +18,7 @@ import traceback
 import inspect
 
 from six.moves import zip, range, filter, urllib, BaseHTTPServer
+from tensorflow.contrib.cudnn_rnn.ops import gen_cudnn_rnn_ops
 from tensorflow.contrib.session_bundle import exporter
 from tensorflow.python.tools import freeze_graph
 from threading import Thread, Lock
@@ -393,8 +394,7 @@ def float32_variable_storage_getter(getter, name, shape=None, dtype=None,
                       initializer=initializer, regularizer=regularizer,
                       trainable=trainable, *args, **kwargs)
     if trainable and dtype != tf.float32:
-        with tf.device(cpu_device):
-            variable = tf.cast(variable, dtype, name='mixed_precision_cast')
+        variable = tf.cast(variable, dtype, name='mixed_precision_cast')
     return variable
 
 
@@ -416,7 +416,7 @@ def variable_on_worker_level(name, shape, initializer):
     return var
 
 
-def BiRNN(batch_x, seq_length, dropout):
+def BiRNN(batch_x, seq_length, dropout, is_training):
     r'''
     That done, we will define the learned variables, the weights and biases,
     within the method ``BiRNN()`` which also constructs the neural network.
@@ -470,7 +470,7 @@ def BiRNN(batch_x, seq_length, dropout):
     if FLAGS.lstm_type == 'basic':
         outputs = basic_lstm(layer_3, seq_length, dropout)
     elif FLAGS.lstm_type == 'cudnn':
-        outputs = cudnn_lstm(layer_3, seq_length, dropout)
+        outputs = cudnn_lstm(layer_3, seq_length, dropout, is_training)
     else:
         log_error('Unknown lstm_type %s' % FLAGS.lstm_type)
 
@@ -494,7 +494,41 @@ def BiRNN(batch_x, seq_length, dropout):
     # Output shape: [n_steps, batch_size, n_hidden_6]
     return layer_6
 
-def cudnn_lstm(inputs, seq_length, dropout):
+# CudnnLSTM requires a bool `training' parameter in __call__ to specify whether
+# we are currently training - unlike other layers, this cannot be a Tensor
+# meaning we are unable to dynamically change this when switching to dev and
+# test datasets. A `tf.cond' is used (see below) to overcome this restriction
+# but backprop will compute the gradient with respect to both the true and
+# false path. The gradient computation for CudnnLSTM when `training=False'
+# throws an error. To overcome this we override the gradient computation with
+# an unsafe version that returns zero instead of throwing an error.
+#
+# Note: An alternative method would change `tf.cond' to do this step but it was
+# significantly more involved.
+@tf.RegisterGradient('UnsafeCudnnRNN')
+def _unsafe_cudnn_rnn_backward(op, *grad):
+    if not op.get_attr("is_training"):
+        return (tf.zeros_like(op.inputs[0]),
+                tf.zeros_like(op.inputs[1]),
+                tf.zeros_like(op.inputs[2]),
+                tf.zeros_like(op.inputs[3]))
+    return gen_cudnn_rnn_ops.cudnn_rnn_backprop(
+        input=op.inputs[0],
+        input_h=op.inputs[1],
+        input_c=op.inputs[2],
+        params=op.inputs[3],
+        output=op.outputs[0],
+        output_h=op.outputs[1],
+        output_c=op.outputs[2],
+        output_backprop=grad[0],
+        output_h_backprop=grad[1],
+        output_c_backprop=grad[2],
+        reserve_space=op.outputs[3],
+        rnn_mode=op.get_attr("rnn_mode"),
+        input_mode=op.get_attr("input_mode"),
+        direction=op.get_attr("direction"))
+
+def cudnn_lstm(inputs, seq_length, dropout, is_training):
     # TODO: Forget bias?
     inputs = tf.nn.dropout(inputs, (1.0 - dropout[4]))
 
@@ -508,12 +542,21 @@ def cudnn_lstm(inputs, seq_length, dropout):
                                           dtype=precision)
     lstm.build(inputs.get_shape())
     lstm._trainable_weights = [v for v in tf.global_variables() if v.name == 'fp32_storage/cudnn_lstm/opaque_kernel:0']
-    tf.get_collection_ref(tf.GraphKeys.SAVEABLE_OBJECTS).remove(lstm._saveable)
-    lstm._saveable = None
-    lstm._create_saveable()
+    collection = tf.get_collection_ref(tf.GraphKeys.SAVEABLE_OBJECTS)
+    try:
+        collection.remove(lstm._saveable)
+        lstm._saveable = None
+        lstm._create_saveable()
+    except:
+        pass
 
-    outputs, output_states = lstm(inputs,
-                                  training=FLAGS.train)
+    if type(is_training) == bool:
+        outputs, output_states = lstm(inputs, training=is_training)
+    else:
+        with tf.get_default_graph().gradient_override_map({'CudnnRNN': 'UnsafeCudnnRNN'}):
+            outputs, output_states = tf.cond(is_training,
+                                                 true_fn=lambda: lstm(inputs, training=True),
+                                                 false_fn=lambda: lstm(inputs, training=False))
 
     outputs = tf.nn.dropout(outputs, (1.0 - dropout[4]))
 
@@ -586,7 +629,7 @@ def decode_with_lm(inputs, sequence_length, beam_width=100,
 # Conveniently, this loss function is implemented in TensorFlow.
 # Thus, we can simply make use of this implementation to define our loss.
 
-def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout):
+def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_training):
     r'''
     This routine beam search decodes a mini-batch and calculates the loss and mean edit distance.
     Next to total and average loss it returns the mean edit distance,
@@ -599,7 +642,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout):
     with tf.variable_scope('fp32_storage',
                            dtype=precision,
                            custom_getter=float32_variable_storage_getter):
-        logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout)
+        logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
     logits = tf.cast(logits, tf.float32)
 
     # Compute the CTC loss using either TensorFlow's `ctc_loss` or Baidu's `warp_ctc_loss`.
@@ -663,7 +706,7 @@ def create_optimizer():
 # on which all operations within the tower execute.
 # For example, all operations of 'tower 0' could execute on the first GPU `tf.device('/gpu:0')`.
 
-def get_tower_results(model_feeder, optimizer):
+def get_tower_results(model_feeder, optimizer, is_training):
     r'''
     With this preliminary step out of the way, we can for each GPU introduce a
     tower for which's batch we calculate
@@ -719,7 +762,7 @@ def get_tower_results(model_feeder, optimizer):
                     # Calculate the avg_loss and mean_edit_distance and retrieve the decoded
                     # batch along with the original batch's labels (Y) of this tower
                     total_loss, avg_loss, distance, mean_edit_distance, decoded, labels = \
-                        calculate_mean_edit_distance_and_loss(model_feeder, i, no_dropout if optimizer is None else dropout_rates)
+                        calculate_mean_edit_distance_and_loss(model_feeder, i, no_dropout if optimizer is None else dropout_rates, is_training)
 
                     # Allow for variables to be re-used by the next tower
                     tf.get_variable_scope().reuse_variables()
@@ -739,7 +782,6 @@ def get_tower_results(model_feeder, optimizer):
                     # Compute gradients for model parameters using tower's mini-batch
                     # Apply loss-scaling to improve numerical stability
                     gradients = optimizer.compute_gradients(FLAGS.loss_scale * avg_loss)
-
                     # Retain tower's gradients
                     tower_gradients.append(gradients)
 
@@ -766,7 +808,7 @@ def average_gradients(tower_gradients):
     average_grads = []
 
     # Run this on cpu_device to conserve GPU memory
-    with tf.device(cpu_device):
+    with tf.device(worker_device):
         # Loop over gradient/variable pairs from all towers
         for grad_and_vars in zip(*tower_gradients):
             # Introduce grads to store the gradients for the current variable
@@ -1581,8 +1623,10 @@ def train(server=None):
                                                    replicas_to_aggregate=FLAGS.replicas_to_agg,
                                                    total_num_replicas=FLAGS.replicas)
 
+    is_training = tf.placeholder(tf.bool, shape=[], name='is_training')
+
     # Get the data_set specific graph end-points
-    results_tuple, gradients, mean_edit_distance, loss = get_tower_results(model_feeder, optimizer)
+    results_tuple, gradients, mean_edit_distance, loss = get_tower_results(model_feeder, optimizer, is_training)
 
     # Average tower gradients across GPUs
     avg_tower_gradients = average_gradients(gradients)
@@ -1673,7 +1717,7 @@ def train(server=None):
                                                config=session_config) as session:
             if len(FLAGS.initialize_from_frozen_model) > 0:
                 log_info('Initializing from frozen model: {}'.format(FLAGS.initialize_from_frozen_model))
-                feed_dict = {}
+                feed_dict = {is_training: False}
                 model_feeder.set_data_set(feed_dict, model_feeder.train)
                 session.run(init_from_frozen_model_op, feed_dict=feed_dict)
 
@@ -1686,7 +1730,7 @@ def train(server=None):
             try:
                 if is_chief:
                     # Retrieving global_step from the (potentially restored) model
-                    feed_dict = {}
+                    feed_dict = {is_training: False}
                     model_feeder.set_data_set(feed_dict, model_feeder.train)
                     step = session.run(global_step, feed_dict=feed_dict)
                     COORD.start_coordination(model_feeder, step)
@@ -1702,6 +1746,7 @@ def train(server=None):
 
                     # Sets the current data_set for the respective placeholder in feed_dict
                     model_feeder.set_data_set(feed_dict, getattr(model_feeder, job.set_name))
+                    feed_dict[is_training] = job.set_name == 'train'
 
                     # Initialize loss aggregator
                     total_loss = 0.0
@@ -1783,7 +1828,7 @@ def create_inference_graph(batch_size=None, output_is_logits=False, use_new_deco
     seq_length = tf.placeholder(tf.int32, [batch_size], name='input_lengths')
 
     # Calculate the logits of the batch using BiRNN
-    logits = BiRNN(input_tensor, tf.to_int64(seq_length) if FLAGS.use_seq_length else None, no_dropout)
+    logits = BiRNN(input_tensor, tf.to_int64(seq_length) if FLAGS.use_seq_length else None, no_dropout, is_training=False)
 
     if output_is_logits:
         return logits
