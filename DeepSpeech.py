@@ -529,7 +529,6 @@ def _unsafe_cudnn_rnn_backward(op, *grad):
         direction=op.get_attr("direction"))
 
 def cudnn_lstm(inputs, seq_length, dropout, is_training):
-    # TODO: Forget bias?
     inputs = tf.nn.dropout(inputs, (1.0 - dropout[4]))
 
     # Note that there is a dropout parameter, but it is "applied between layers
@@ -639,11 +638,14 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     batch_x, batch_seq_len, batch_y = model_feeder.next_batch(tower)
 
     # Calculate the logits of the batch using BiRNN
-    with tf.variable_scope('fp32_storage',
-                           dtype=precision,
-                           custom_getter=float32_variable_storage_getter):
+    if precision != tf.float32:
+        with tf.variable_scope('fp32_storage',
+                               dtype=precision,
+                               custom_getter=float32_variable_storage_getter):
+            logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
+        logits = tf.cast(logits, tf.float32)
+    else:
         logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
-    logits = tf.cast(logits, tf.float32)
 
     # Compute the CTC loss using either TensorFlow's `ctc_loss` or Baidu's `warp_ctc_loss`.
     if FLAGS.use_warpctc:
@@ -1675,8 +1677,8 @@ def train(server=None):
         hooks.append(tf.train.SummarySaverHook(save_secs=FLAGS.summary_secs, output_dir=FLAGS.summary_dir, summary_op=merge_all_summaries_op))
 
     # Hook wih number of checkpoint files to save in checkpoint_dir
+    saver = tf.train.Saver(max_to_keep=FLAGS.max_to_keep)
     if FLAGS.train and FLAGS.max_to_keep > 0:
-        saver = tf.train.Saver(max_to_keep=FLAGS.max_to_keep)
         hooks.append(tf.train.CheckpointSaverHook(checkpoint_dir=FLAGS.checkpoint_dir, save_secs=FLAGS.checkpoint_secs, saver=saver))
 
     if len(FLAGS.initialize_from_frozen_model) > 0:
