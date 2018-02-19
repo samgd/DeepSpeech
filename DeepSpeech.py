@@ -750,7 +750,7 @@ def get_tower_results(model_feeder, optimizer, is_training):
     # To calculate the mean of the losses
     tower_avg_losses = []
 
-    with tf.variable_scope(tf.get_variable_scope()):
+    with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
         # Loop over available_devices
         for i in range(len(available_devices)):
             # Execute operations of tower i on device i

@@ -10,3 +10,4 @@ mkdir $TF_DIR
 export COMPUTE_KEEP_DIR=$TF_DIR
 ./test.sh 2>&1 | tee $OUT_LOG
 touch $LOG_DIR'finished'
+sudo shutdown
