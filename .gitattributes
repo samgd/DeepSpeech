@@ -4,10 +4,10 @@ models/checkpoint/checkpoint filter=lfs diff=lfs merge=lfs -text
 models/checkpoint/model.ckpt-97999.data-00000-of-00001 filter=lfs diff=lfs merge=lfs -text
 models/checkpoint/model.ckpt-97999.index filter=lfs diff=lfs merge=lfs -text
 models/checkpoint/model.ckpt-97999.meta filter=lfs diff=lfs merge=lfs -text
-models/mixed_cudnn_checkpoint/checkpoint filter=lfs diff=lfs merge=lfs -text
-models/mixed_cudnn_checkpoint/model.ckpt-97999.data-00000-of-00001 filter=lfs diff=lfs merge=lfs -text
-models/mixed_cudnn_checkpoint/model.ckpt-97999.index filter=lfs diff=lfs merge=lfs -text
-models/mixed_cudnn_checkpoint/model.ckpt-97999.meta filter=lfs diff=lfs merge=lfs -text
 models/cudnn_checkpoint/model.ckpt-0.data-00000-of-00001 filter=lfs diff=lfs merge=lfs -text
 models/cudnn_checkpoint/model.ckpt-0.index filter=lfs diff=lfs merge=lfs -text
 models/cudnn_checkpoint/model.ckpt-0.meta filter=lfs diff=lfs merge=lfs -text
+models/mixed_cudnn_checkpoint/model.ckpt-0.data-00000-of-00001 filter=lfs diff=lfs merge=lfs -text
+models/mixed_cudnn_checkpoint/model.ckpt-0.index filter=lfs diff=lfs merge=lfs -text
+models/mixed_cudnn_checkpoint/model.ckpt-0.meta filter=lfs diff=lfs merge=lfs -text
+models/mixed_cudnn_checkpoint/checkpoint filter=lfs diff=lfs merge=lfs -text
