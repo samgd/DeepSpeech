@@ -28,13 +28,19 @@ python -u DeepSpeech.py \
   --train_files "$COMPUTE_DATA_DIR/librivox-train-clean-100.csv,$COMPUTE_DATA_DIR/librivox-train-clean-360.csv,$COMPUTE_DATA_DIR/librivox-train-other-500.csv" \
   --dev_files "$COMPUTE_DATA_DIR/librivox-dev-clean.csv" \
   --test_files "$COMPUTE_DATA_DIR/librivox-test-clean.csv" \
+  --train_batch_size 48 \
+  --dev_batch_size 48 \
   --test_batch_size 48 \
-  --notrain \
-  --test \
+  --epoch 1 \
   --n_hidden 2048 \
-  --wer_log_pattern "GLOBAL LOG: logwer('${COMPUTE_ID}', '%s', '%s', %f)" \
   --lstm_type cudnn \
   --half_precision \
+  --loss_scale 16 \
+  --learning_rate 0.0001 \
+  --dropout_rate 0.2367 \
+  --default_stddev 0.046875 \
+  --early_stop 0 \
+  --wer_log_pattern "GLOBAL LOG: logwer('${COMPUTE_ID}', '%s', '%s', %f)" \
   --log_level 0 \
   --display_step 0 \
   --initialize_from_checkpoint "$HOME/efs/1-epoch_cudnn_mixed-precision_batch-48/tf_dir/checkpoints/model.ckpt-1464" \
@@ -43,6 +49,4 @@ python -u DeepSpeech.py \
   --checkpoint_secs 300 \
   --checkpoint_dir "$checkpoint_dir/checkpoints" \
   --report_count 100 \
-  --dropout_rate 0.0 \
-  --early_stop 0 \
   "$@"

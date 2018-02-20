@@ -1,13 +1,15 @@
 #!/bin/bash
 STORE='/home/ubuntu/efs/'
-EXPERIMENT='0-epoch_basic_full-precision/'
+EXPERIMENT='test/'
 LOG_DIR=$STORE$EXPERIMENT
 TF_DIR=$LOG_DIR'tf_dir'
-OUT_LOG=$LOG_DIR'out_log.txt'
+TRAIN_LOG=$LOG_DIR'train_log.txt'
+TEST_LOG=$LOG_DIR'test_log.txt'
 
 mkdir $LOG_DIR
 mkdir $TF_DIR
 export COMPUTE_KEEP_DIR=$TF_DIR
-./test.sh 2>&1 | tee $OUT_LOG
+./train.sh 2>&1 | tee $TRAIN_LOG
+./test.sh 2>&1 | tee $TEST_LOG
 touch $LOG_DIR'finished'
 sudo shutdown
