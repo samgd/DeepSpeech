@@ -132,6 +132,10 @@ tf.app.flags.DEFINE_integer ('n_hidden',         2048,        'layer width to us
 
 tf.app.flags.DEFINE_string  ('lstm_type',        'basic',     'LSTM implementation to use')
 
+# Masking
+
+tf.app.flags.DEFINE_boolean ('apply_mask',       False,       'load and apply binary masks to the trainable variables.')
+
 # Initialization
 
 tf.app.flags.DEFINE_integer ('random_seed',      4567,        'default random seed that is used to initialize variables')
@@ -379,6 +383,32 @@ def log_error(message):
 
 # Graph Creation
 # ==============
+
+def mask_getter(getter, name, shape=None, dtype=tf.float32, trainable=True,
+                *args, **kwargs):
+    r'''
+    Apply a variable that is masked if trainable and FLAG.apply_mask is set.
+
+    The default mask is all zeros - the mask's actual value should be restored
+    from a checkpoint.
+    '''
+    variable = getter(name,
+                      shape=shape,
+                      dtype=dtype,
+                      trainable=trainable,
+                      *args, **kwargs)
+    if not (FLAGS.apply_mask and trainable):
+        return variable
+
+    initializer = tf.zeros_like(variable) if shape is None else tf.zeros_initializer
+    mask = getter(name + '/mask',
+                  dtype=dtype,
+                  shape=shape,
+                  initializer=initializer,
+                  trainable=False,
+                  validate_shape=shape is not None)
+
+    return tf.multiply(variable, mask, name=name + '_masked')
 
 def float32_variable_storage_getter(getter, name, shape=None, dtype=None,
                                     initializer=None, regularizer=None,
@@ -638,14 +668,15 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     batch_x, batch_seq_len, batch_y = model_feeder.next_batch(tower)
 
     # Calculate the logits of the batch using BiRNN
-    if precision != tf.float32:
-        with tf.variable_scope('fp32_storage',
-                               dtype=precision,
-                               custom_getter=float32_variable_storage_getter):
+    with tf.variable_scope(tf.get_variable_scope(), custom_getter=mask_getter):
+        if precision != tf.float32:
+            with tf.variable_scope('fp32_storage',
+                                   dtype=precision,
+                                   custom_getter=float32_variable_storage_getter):
+                logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
+            logits = tf.cast(logits, tf.float32)
+        else:
             logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
-        logits = tf.cast(logits, tf.float32)
-    else:
-        logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
 
     # Compute the CTC loss using either TensorFlow's `ctc_loss` or Baidu's `warp_ctc_loss`.
     if FLAGS.use_warpctc:
