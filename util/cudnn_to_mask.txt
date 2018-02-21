@@ -1,0 +1,11 @@
+fp32_storage/h1
+fp32_storage/b1
+fp32_storage/h2
+fp32_storage/b2
+fp32_storage/h3
+fp32_storage/b3
+fp32_storage/cudnn_lstm/opaque_kernel
+fp32_storage/h5
+fp32_storage/b5
+fp32_storage/h6
+fp32_storage/b6

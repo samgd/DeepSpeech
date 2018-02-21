@@ -1,0 +1,14 @@
+h1
+b1
+h2
+b2
+h3
+b3
+bidirectional_rnn/fw/basic_lstm_cell/kernel
+bidirectional_rnn/fw/basic_lstm_cell/bias
+bidirectional_rnn/bw/basic_lstm_cell/kernel
+bidirectional_rnn/bw/basic_lstm_cell/bias
+h5
+b5
+h6
+b6
