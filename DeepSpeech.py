@@ -116,6 +116,7 @@ tf.app.flags.DEFINE_boolean ('use_seq_length',   True,        'have sequence_len
 tf.app.flags.DEFINE_integer ('log_level',        1,           'log level for console logs - 0: INFO, 1: WARN, 2: ERROR, 3: FATAL')
 tf.app.flags.DEFINE_boolean ('log_traffic',      False,       'log cluster transaction and traffic information during debug logging')
 
+tf.app.flags.DEFINE_boolean ('report_wer',       True,        'compute and report WER if True')
 tf.app.flags.DEFINE_string  ('wer_log_pattern',  '',          'pattern for machine readable global logging of WER progress; has to contain %%s, %%s and %%f for the set name, the date and the float respectively; example: "GLOBAL LOG: logwer(\'12ade231\', %%s, %%s, %%f)" would result in some entry like "GLOBAL LOG: logwer(\'12ade231\', \'train\', \'2017-05-18T03:09:48-0700\', 0.05)"; if omitted (default), there will be no logging')
 
 tf.app.flags.DEFINE_boolean ('log_placement',    False,       'whether to log device placement of the operators to the console')
@@ -1183,7 +1184,7 @@ class Epoch(object):
                 if (FLAGS.early_stop is True) and (self.set_name == 'dev'):
                     COORD._dev_losses.append(self.loss)
 
-                if self.report:
+                if self.report and FLAGS.report_wer:
                     self.wer = agg_wer / num_jobs
                     self.mean_edit_distance = agg_mean_edit_distance / num_jobs
 
@@ -1197,7 +1198,7 @@ class Epoch(object):
                     self.samples.sort(key=lambda s: s.wer)
 
                     # Append WER to WER log file
-                    if len(FLAGS.wer_log_pattern) > 0:
+                    if len(FLAGS.wer_log_pattern) > 0 and FLAGS.report_wer:
                         time = datetime.datetime.utcnow().isoformat()
                         # Log WER progress
                         print(FLAGS.wer_log_pattern % (time, self.set_name, self.wer))
@@ -1217,7 +1218,7 @@ class Epoch(object):
         if not self.done():
             return self.job_status()
 
-        if not self.report:
+        if not self.report or not FLAGS.report_wer:
             return '%s - loss: %f' % (self.name(), self.loss)
 
         s = '%s - WER: %f, loss: %s, mean edit distance: %f' % (self.name(), self.wer, self.loss, self.mean_edit_distance)
@@ -1788,7 +1789,7 @@ def train(server=None):
                     train_op = apply_gradient_op if job.set_name == 'train' else []
 
                     # Requirements to display a WER report
-                    if job.report:
+                    if job.report and FLAGS.report_wer:
                         # Reset mean edit distance
                         total_mean_edit_distance = 0.0
                         # Create report results tuple
@@ -1816,7 +1817,7 @@ def train(server=None):
                         # Add batch to loss
                         total_loss += batch_loss
 
-                        if job.report:
+                        if job.report and FLAGS.report_wer:
                             # Collect individual sample results
                             collect_results(report_results, batch_report[0])
                             # Add batch to total_mean_edit_distance
@@ -1824,7 +1825,7 @@ def train(server=None):
 
                     # Gathering job results
                     job.loss = total_loss / job.steps
-                    if job.report:
+                    if job.report and FLAGS.report_wer:
                         job.mean_edit_distance = total_mean_edit_distance / job.steps
                         job.wer, job.samples = calculate_report(report_results)
 
