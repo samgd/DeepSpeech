@@ -126,7 +126,7 @@ def threshold(in_ckpt, to_mask, sparsity=0.0):
         print('no values found when computing threshold')
         return 0
 
-    old_sparsity = float(total_masked) / total_params * 100.0
+    old_sparsity = (total_params - float(total_masked)) / total_params * 100.0
     sparsity_diff = sparsity - old_sparsity
     if sparsity_diff < 0:
         raise ValueError('new sparsity (%.2f%%) must be >= current sparsity (%.2f%%)' % (sparsity, old_sparsity))
