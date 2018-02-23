@@ -42,6 +42,25 @@ class TestCheckpointSparsity(unittest.TestCase):
         shutil.rmtree(self.test_dir)
 
 
+    def test_apply_masks(self):
+        # Create sparsity masks.
+        mask_ckpt = self.ckpt + '-masks'
+        target_sparsity = 40.0
+        cs.add_masks(mask_ckpt,
+                     self.ckpt,
+                     to_mask=self.to_mask,
+                     sparsity=target_sparsity)
+        app_ckpt = self.ckpt + '-app'
+
+        # Apply sparsity masks.
+        cs.apply_masks(app_ckpt, mask_ckpt)
+        reader = tf.train.NewCheckpointReader(app_ckpt)
+        for name in self.to_mask:
+            tensor = reader.get_tensor(name)
+            sparsity = get_sparsity(tensor)
+            self.assertAlmostEqual(sparsity, target_sparsity, places=1)
+
+
     def test_add_masks_creates_masks_correct_sparsity_percentage(self):
         '''Ensure mask added with correct sparsity percentage to checkpoint'''
         out_ckpt = self.ckpt + '-masks'
@@ -105,9 +124,12 @@ class TestCheckpointSparsity(unittest.TestCase):
                 continue
 
             mask = reader.get_tensor(get_mask_name(name))
-            sparsity = (float(np.sum(mask == 0)) / mask.size) * 100
+            sparsity = get_sparsity(mask)
             self.assertAlmostEqual(sparsity, target_sparsity, places=1)
 
+
+def get_sparsity(tensor):
+    return (float(np.sum(tensor == 0)) / tensor.size) * 100
 
 def get_mask_name(name):
     return name + '/mask'
