@@ -170,6 +170,7 @@ def threshold(in_ckpt, to_mask, sparsity=0.0):
     # are only able to induce sparsity in the remaining fraction of values thus
     # we scale it accordingly.
     percentile = (float(total_params) / values.size) * sparsity_diff
+    percentile = min(percentile, 100.0) # Fix rounding errors.
 
     return np.percentile(values, percentile)
 
