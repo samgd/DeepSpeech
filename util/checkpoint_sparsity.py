@@ -152,7 +152,6 @@ def threshold(in_ckpt, to_mask, sparsity=0.0):
         if mask_name in var_to_shape_map:
             mask = reader.get_tensor(mask_name)
             total_masked += np.sum(mask == 0)
-            print(total_masked)
             tensor = tensor[mask == 1]
 
         tensor = tensor.flatten()
@@ -164,7 +163,6 @@ def threshold(in_ckpt, to_mask, sparsity=0.0):
         return 0
 
     old_sparsity = (float(total_masked) / total_params) * 100.0
-    print(old_sparsity)
     sparsity_diff = sparsity - old_sparsity
     if sparsity_diff < 0:
         raise ValueError('new sparsity (%.2f%%) must be >= current sparsity (%.2f%%)' % (sparsity, old_sparsity))
