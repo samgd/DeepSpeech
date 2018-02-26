@@ -27,7 +27,7 @@ fi
 python -u DeepSpeech.py \
   --train_files "$COMPUTE_DATA_DIR/librivox-train-clean-100.csv,$COMPUTE_DATA_DIR/librivox-train-clean-360.csv,$COMPUTE_DATA_DIR/librivox-train-other-500.csv" \
   --dev_files "$COMPUTE_DATA_DIR/librivox-dev-clean.csv" \
-  --test_files "$COMPUTE_DATA_DIR/librivox-test-clean.csv" \
+  --test_files "$HOME/efs/librivox/librivox-dev-clean-apostrophe.csv" \
   --test_batch_size 32 \
   --notrain \
   --test \
@@ -37,8 +37,13 @@ python -u DeepSpeech.py \
   --half_precision \
   --log_level 0 \
   --display_step 0 \
-  --initialize_from_checkpoint "$HOME/efs/3-epoch_cudnn_mixed-precision/tf_dir/checkpoints/model.ckpt-6591" \
-  --report_count 100 \
+  --summary_secs 300 \
+  --summary_dir "$checkpoint_dir/summaries" \
+  --checkpoint_secs 300 \
+  --checkpoint_dir "$checkpoint_dir/checkpoints" \
+  --report_count 10000 \
   --dropout_rate 0.0 \
-  --early_stop 0 \
+  --noearly_stop \
+  --apply_mask 1 \
+  --noreport_wer \
   "$@"

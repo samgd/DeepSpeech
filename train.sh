@@ -27,26 +27,28 @@ fi
 python -u DeepSpeech.py \
   --train_files "$COMPUTE_DATA_DIR/librivox-train-clean-100.csv,$COMPUTE_DATA_DIR/librivox-train-clean-360.csv,$COMPUTE_DATA_DIR/librivox-train-other-500.csv" \
   --dev_files "$COMPUTE_DATA_DIR/librivox-dev-clean.csv" \
-  --test_files "$COMPUTE_DATA_DIR/librivox-test-clean.csv" \
-  --train_batch_size 48 \
-  --dev_batch_size 48 \
-  --test_batch_size 48 \
-  --epoch 1 \
+  --test_files "$HOME/efs/librivox/librivox-dev-clean-apostrophe.csv" \
+  --train_batch_size 32 \
+  --dev_batch_size 32 \
+  --limit_dev 1 \
+  --notest \
   --n_hidden 2048 \
   --lstm_type cudnn \
   --half_precision \
   --loss_scale 16 \
   --learning_rate 0.0001 \
-  --dropout_rate 0.2367 \
   --default_stddev 0.046875 \
-  --early_stop 0 \
+  --noearly_stop \
   --wer_log_pattern "GLOBAL LOG: logwer('${COMPUTE_ID}', '%s', '%s', %f)" \
   --log_level 0 \
   --display_step 0 \
-  --initialize_from_checkpoint "$HOME/efs/1-epoch_cudnn_mixed-precision_batch-48/tf_dir/checkpoints/model.ckpt-1464" \
   --summary_secs 300 \
   --summary_dir "$checkpoint_dir/summaries" \
   --checkpoint_secs 300 \
   --checkpoint_dir "$checkpoint_dir/checkpoints" \
-  --report_count 100 \
+  --report_count 10000 \
+  --max_to_keep 1 \
+  --validation_step 1 \
+  --apply_mask 1 \
+  --noreport_wer \
   "$@"
