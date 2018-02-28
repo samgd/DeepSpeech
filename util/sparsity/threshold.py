@@ -4,60 +4,7 @@ import sys
 
 from tensorflow.contrib.framework import assign_from_values
 
-tf.app.flags.DEFINE_string  ('in_ckpt',  '',  'checkpoint to read Tensor values from')
-tf.app.flags.DEFINE_string  ('out_ckpt', '',  'checkpoint to write Tensor and mask values to')
-tf.app.flags.DEFINE_string  ('to_mask',  '',  'file containing names of Tensors to mask, one per line')
-tf.app.flags.DEFINE_float   ('sparsity', 0.0, 'sparsity percentage between 0.0 and 100.0 inclusive.')
-
-FLAGS = tf.app.flags.FLAGS
-
-def main(_):
-    validate_sparsity()
-
-    with open(FLAGS.to_mask, 'r') as f:
-        to_mask = f.read().split('\n')
-
-    add_masks(FLAGS.out_ckpt,
-              FLAGS.in_ckpt,
-              to_mask,
-              FLAGS.sparsity)
-
-def apply_masks(out_ckpt, in_ckpt):
-    '''Applies masks to Tensors with masks in in_ckpt.
-
-    Masks are not saved in out_ckpt.
-
-    Args:
-        out_ckpt: Checkpoint to write Tensor values to.
-        in_ckpt: Checkpoint to read Tensor and mask values from.
-    '''
-    tf.reset_default_graph()
-
-    reader = tf.train.NewCheckpointReader(in_ckpt)
-    var_to_shape_map = reader.get_variable_to_shape_map()
-    var_to_dtype_map = reader.get_variable_to_dtype_map()
-    var_names_to_values = {}
-
-    for name, shape in var_to_shape_map.items():
-        # Create variable in out_ckpt and add to value map.
-        tensor = reader.get_tensor(name)
-
-        # Read mask and apply mask if exist.
-        mask_name = get_mask_name(name)
-        if mask_name in var_to_shape_map:
-            mask = reader.get_tensor(mask_name)
-            tensor = np.multiply(tensor, mask)
-
-        dtype = var_to_dtype_map[name]
-        tf.get_variable(name, shape=shape, dtype=dtype)
-        var_names_to_values[name] = tensor
-
-    saver = tf.train.Saver()
-    with tf.Session() as sess:
-        assign_op, feed_dict = assign_from_values(var_names_to_values)
-        sess.run(assign_op, feed_dict)
-        saver.save(sess, out_ckpt)
-
+from util.sparsity.mask import get_mask_name
 
 def add_masks(out_ckpt, in_ckpt, to_mask, sparsity=0.0):
     '''Add masks for variables in to_mask to out_ckpt based on sparsity percent.
@@ -173,18 +120,3 @@ def threshold(in_ckpt, to_mask, sparsity=0.0):
     percentile = min(percentile, 100.0) # Fix rounding errors.
 
     return np.percentile(values, percentile)
-
-
-def get_mask_name(tensor_name):
-    '''Return the name of the mask for a given a Tensor.'''
-    return tensor_name + '/mask'
-
-
-def validate_sparsity():
-    if not (0.0 <= FLAGS.sparsity <= 100.0):
-        print('sparsity must be between 0.0 and 100.0 inclusive, got %.2f' % FLAGS.sparsity)
-        sys.exit(0)
-
-
-if __name__ == '__main__':
-    tf.app.run()

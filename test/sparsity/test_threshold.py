@@ -4,9 +4,12 @@ import shutil
 import tempfile
 import tensorflow as tf
 import unittest
-import util.checkpoint_sparsity as cs
+
+import util.sparsity.mask as mask
 
 from tensorflow.contrib.framework import assign_from_values
+
+from util.sparsity.threshold import add_masks
 
 class TestCheckpointSparsity(unittest.TestCase):
 
@@ -46,14 +49,14 @@ class TestCheckpointSparsity(unittest.TestCase):
         # Create sparsity masks.
         mask_ckpt = self.ckpt + '-masks'
         target_sparsity = 40.0
-        cs.add_masks(mask_ckpt,
+        add_masks(mask_ckpt,
                      self.ckpt,
                      to_mask=self.to_mask,
                      sparsity=target_sparsity)
         app_ckpt = self.ckpt + '-app'
 
         # Apply sparsity masks.
-        cs.apply_masks(app_ckpt, mask_ckpt)
+        mask.apply_masks(app_ckpt, mask_ckpt)
         reader = tf.train.NewCheckpointReader(app_ckpt)
         for name in self.to_mask:
             tensor = reader.get_tensor(name)
@@ -65,7 +68,7 @@ class TestCheckpointSparsity(unittest.TestCase):
         '''Ensure mask added with correct sparsity percentage to checkpoint'''
         out_ckpt = self.ckpt + '-masks'
         target_sparsity = 40.0
-        cs.add_masks(out_ckpt,
+        add_masks(out_ckpt,
                      self.ckpt,
                      to_mask=self.to_mask,
                      sparsity=target_sparsity)
@@ -79,7 +82,7 @@ class TestCheckpointSparsity(unittest.TestCase):
         mask_log = []
         for i, sparsity in enumerate(target_sparsity):
             out_ckpt = in_ckpt + ('-%d' % i)
-            cs.add_masks(out_ckpt,
+            add_masks(out_ckpt,
                          in_ckpt,
                          to_mask=self.to_mask,
                          sparsity=sparsity)
@@ -108,7 +111,7 @@ class TestCheckpointSparsity(unittest.TestCase):
         reader = tf.train.NewCheckpointReader(ckpt)
         masks = []
         for name in self.to_mask:
-            mask_name = get_mask_name(name)
+            mask_name = mask.get_mask_name(name)
             masks.append(reader.get_tensor(mask_name))
         return masks
 
