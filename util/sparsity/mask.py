@@ -3,11 +3,9 @@ import tensorflow as tf
 
 from tensorflow.contrib.framework import assign_from_values
 
-
 def get_mask_name(tensor_name):
     '''Return the name of the mask for a given a Tensor.'''
     return tensor_name + '/mask'
-
 
 def apply_masks(out_ckpt, in_ckpt):
     '''Applies masks to Tensors with masks in in_ckpt.
@@ -44,3 +42,34 @@ def apply_masks(out_ckpt, in_ckpt):
         assign_op, feed_dict = assign_from_values(var_names_to_values)
         sess.run(assign_op, feed_dict)
         saver.save(sess, out_ckpt)
+
+def tensor_sparsity_percent(tensor):
+    '''Returns sparsity % of a given Tensor.'''
+    return (float(np.sum(tensor == 0)) / tensor.size) * 100
+
+def ckpt_sparsity_percent(ckpt, to_mask):
+    '''Return total sparsity percentage of Tensors in to_mask.
+
+    Args:
+        out_ckpt: Checkpoint to read mask values from.
+        to_mask: Names of Tensors to include in sparsity calculation.
+
+    Returns:
+        Sparsity value [0.0, 100.0].
+    '''
+    reader = tf.train.NewCheckpointReader(ckpt)
+    var_to_shape_map = reader.get_variable_to_shape_map()
+
+    total_params = 0
+    total_masked = 0
+    for name in to_mask:
+        tensor = reader.get_tensor(name)
+        total_params += tensor.size
+
+        mask_name = get_mask_name(name)
+        if mask_name not in var_to_shape_map:
+            continue
+        mask = reader.get_tensor(mask_name)
+        total_masked += np.sum(mask == 0)
+
+    return float(total_masked) / total_params * 100.0
