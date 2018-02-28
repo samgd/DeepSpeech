@@ -3,6 +3,8 @@ import tensorflow as tf
 
 from tensorflow.contrib.framework import assign_from_values
 
+from util.opaque_params import split
+
 def get_mask_name(tensor_name):
     '''Return the name of the mask for a given a Tensor.'''
     return tensor_name + '/mask'
@@ -46,6 +48,26 @@ def apply_masks(out_ckpt, in_ckpt):
 def tensor_sparsity_percent(tensor):
     '''Returns sparsity % of a given Tensor.'''
     return (float(np.sum(tensor == 0)) / tensor.size) * 100
+
+def ckpt_layerwise_sparsity_percent(ckpt, to_mask, opaque_params_name=''):
+    '''Return the sparsity percentage of each name in to_mask.'''
+    reader = tf.train.NewCheckpointReader(ckpt)
+    var_to_shape_map = reader.get_variable_to_shape_map()
+
+    sparsity_percents = {}
+    for name in to_mask:
+        mask_name = get_mask_name(name)
+        if mask_name not in var_to_shape_map:
+            continue
+        mask = reader.get_tensor(mask_name)
+        if name != opaque_params_name:
+            sparsity_percents[name] = tensor_sparsity_percent(mask)
+            continue
+        param_vals = split(mask)
+        for name, value in param_vals.items():
+            sparsity_percents[name] = tensor_sparsity_percent(value)
+
+    return sparsity_percents
 
 def ckpt_sparsity_percent(ckpt, to_mask):
     '''Return total sparsity percentage of Tensors in to_mask.
