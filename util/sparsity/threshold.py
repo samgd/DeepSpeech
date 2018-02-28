@@ -190,6 +190,7 @@ def tensor_threshold(tensor, sparsity, mask=None):
         raise ValueError('new sparsity (%.2f%%) must be >= current sparsity (%.2f%%) and <= 100.0' % (
             sparsity, old_sparsity))
     percentile = sparsity_diff / (1.0 - old_sparsity/100.0)
+    percentile = min(100.0, percentile)
 
     values = np.abs(tensor.flatten())
     if mask is not None:
