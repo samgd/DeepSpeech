@@ -10,6 +10,7 @@ import util.sparsity.mask as mask
 from tensorflow.contrib.framework import assign_from_values
 
 from util.sparsity.threshold import add_masks
+from util.sparsity.threshold import layerwise_add_masks_limit
 
 class TestThreshold(unittest.TestCase):
 
@@ -103,6 +104,35 @@ class TestThreshold(unittest.TestCase):
             mask_log.append(self.get_masks(out_ckpt))
         self.check_mask_subset(mask_log)
 
+    def test_layerwise_add_masks_limit(self):
+        # Add mask for one variable only.
+        out_ckpt = self.ckpt + '-masks'
+        target_sparsity = 40.0
+        layerwise_add_masks_limit(out_ckpt,
+                                  self.ckpt,
+                                  to_mask=['foo'],
+                                  limit_sparsity=target_sparsity)
+        self.check_tensor_sparsity('foo', out_ckpt, target_sparsity)
+        self.check_tensor_sparsity('bar', out_ckpt, 0.0)
+        in_ckpt, out_ckpt = out_ckpt, out_ckpt + '-1'
+
+        # Increase sparsity - should only affect 'bar'.
+        layerwise_add_masks_limit(out_ckpt,
+                                  in_ckpt,
+                                  to_mask=self.to_mask,
+                                  limit_sparsity=target_sparsity - 10.0)
+        self.check_tensor_sparsity('foo', out_ckpt, target_sparsity)
+        self.check_tensor_sparsity('bar', out_ckpt, target_sparsity - 10.0)
+        in_ckpt, out_ckpt = out_ckpt, out_ckpt + '-2'
+
+        # Increase sparsity in both.
+        layerwise_add_masks_limit(out_ckpt,
+                                  in_ckpt,
+                                  to_mask=self.to_mask,
+                                  limit_sparsity=target_sparsity + 10.0)
+        self.check_tensor_sparsity('foo', out_ckpt, target_sparsity + 10.0)
+        self.check_tensor_sparsity('bar', out_ckpt, target_sparsity + 10.0)
+
     def check_mask_subset(self, mask_log):
         '''Ensure each list of masks contains the previous as a subset.'''
         if len(mask_log) == 1:
@@ -141,3 +171,14 @@ class TestThreshold(unittest.TestCase):
                 mask_values = reader.get_tensor(mask.get_mask_name(name))
                 sparsity = mask.tensor_sparsity_percent(mask_values)
                 self.assertAlmostEqual(sparsity, target_sparsity, places=1)
+
+    def check_tensor_sparsity(self, name, ckpt, target_sparsity):
+        '''Ensure tensor in ckpt has target_sparsity.'''
+        reader = tf.train.NewCheckpointReader(ckpt)
+        tensor = reader.get_tensor(name)
+        mask_name = mask.get_mask_name(name)
+        if mask_name not in reader.get_variable_to_dtype_map():
+            return 0.0
+        mask_values = reader.get_tensor(mask.get_mask_name(name))
+        sparsity = mask.tensor_sparsity_percent(mask_values)
+        self.assertAlmostEqual(sparsity, target_sparsity, places=1)

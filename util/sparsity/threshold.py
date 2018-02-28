@@ -7,6 +7,31 @@ from tensorflow.contrib.framework import assign_from_values
 from util.sparsity.mask import get_mask_name
 from util.sparsity.mask import tensor_sparsity_percent
 
+def layerwise_add_masks_limit(out_ckpt, in_ckpt, to_mask, limit_sparsity=0.0):
+    '''Add masks for variables in to_mask to out_ckpt up to limit_sparsity.'''
+    # Get names of variables whose sparsity is less than limit_sparsity.
+    reader = tf.train.NewCheckpointReader(in_ckpt)
+    var_to_shape_map = reader.get_variable_to_shape_map()
+
+    to_increase = []
+    for name in to_mask:
+        mask_name = get_mask_name(name)
+
+        if mask_name not in var_to_shape_map:
+            # No mask, must create one.
+            to_increase.append(name)
+            continue
+
+        sparsity = tensor_sparsity_percent(reader.get_tensor(mask_name))
+        if sparsity < limit_sparsity:
+            to_increase.append(name)
+
+    add_masks(out_ckpt,
+              in_ckpt,
+              to_increase,
+              sparsity=limit_sparsity,
+              use_layerwise_threshold=True)
+
 def add_masks(out_ckpt, in_ckpt, to_mask, sparsity=0.0, use_layerwise_threshold=False):
     '''Add masks for variables in to_mask to out_ckpt based on sparsity percent.
 
@@ -95,7 +120,6 @@ def layerwise_threshold(in_ckpt, to_mask, sparsity=0.0):
     thresholds = {}
     for name in to_mask:
         tensor = reader.get_tensor(name)
-
         mask_name = get_mask_name(name)
         mask = reader.get_tensor(mask_name) if mask_name in var_to_shape_map else None
         thresholds[name] = tensor_threshold(tensor,
