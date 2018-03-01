@@ -265,13 +265,16 @@ def tensor_threshold(tensor, sparsity, mask=None):
     sparsity_diff = sparsity - old_sparsity
     if sparsity_diff < 0 or sparsity_diff > 100.0:
         return 0.0
-    percentile = sparsity_diff / (1.0 - old_sparsity/100.0)
+    norm = 1.0 - old_sparsity/100.0
+    if norm == 0.0:
+        norm = 1.0
+    percentile = sparsity_diff / norm
     percentile = min(100.0, percentile)
 
     values = np.abs(tensor.flatten())
     if mask is not None:
         values = values[mask.flatten() == 1]
     if values.size == 0:
-        raise ValueError('no values found when computing threshold')
+        return 0.0
 
     return np.percentile(values, percentile)
