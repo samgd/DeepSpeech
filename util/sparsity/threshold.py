@@ -58,10 +58,11 @@ def add_masks(out_ckpt, in_ckpt, to_mask, sparsity=0.0,
     '''
     if use_layerwise_threshold and opaque_params_name:
         var_names_to_values = get_and_split_opaque(in_ckpt, opaque_params_name)
+        ignore_params = [opaque_params_name, get_mask_name(opaque_params_name)]
     else:
         var_names_to_values = {}
-
-    var_names_to_values = get_values(in_ckpt, to_mask, var_names_to_values)
+        ignore_params = []
+    var_names_to_values = get_values(in_ckpt, to_mask, var_names_to_values, ignore_params)
     if not use_layerwise_threshold:
         thresholds = global_threshold(var_names_to_values, to_mask, sparsity)
     else:
@@ -103,13 +104,19 @@ def update_masks(var_names_to_values, to_mask, thresholds):
         updated_values[mask_name] = np.abs(tensor) > thresholds[name]
     return updated_values
 
-def get_values(ckpt, to_mask, extra_params=None):
+def get_values(ckpt, to_mask, extra_params=None, ignore_params=None):
     '''Return a dict of Tensor names in to_mask, and mask names, to values.'''
     reader = tf.train.NewCheckpointReader(ckpt)
     var_to_shape_map = reader.get_variable_to_shape_map()
 
     var_names_to_values = {}
-    for name in var_to_shape_map:
+    all_names = var_to_shape_map.keys()
+    if extra_params:
+        all_names.extend(extra_params.keys())
+
+    for name in all_names:
+        if ignore_params and name in ignore_params:
+            continue
         # Get Tensor and get or create mask.
         if name in var_to_shape_map:
             tensor = reader.get_tensor(name)
@@ -159,20 +166,19 @@ def join_opaque(var_names_to_values, opaque_params_name):
     # Reconstruct parameter blob.
     weight_shapes = opaque_params.get_weight_shapes('fw_')
     weight_shapes.extend(opaque_params.get_weight_shapes('bw_'))
-    weight_names = [name for name, _ in weight_shapes]
-    split_params = {name: var_names_to_values[name]
-                    for name in weight_names}
+    names = [name for name, _ in weight_shapes]
+    names.extend(opaque_params.get_bias_names('fw_'))
+    names.extend(opaque_params.get_bias_names('bw_'))
+    split_params = {name: var_names_to_values[name] for name in names}
     updated_values[opaque_params_name] = opaque_params.join(split_params)
     # Reconstruct parameter blob mask.
-    bias_names = opaque_params.get_bias_names('fw_')
-    bias_names.extend(opaque_params.get_bias_names('bw_'))
-    split_mask = {name: var_names_to_values[get_mask_name(name)]
-                  for name in bias_names}
+    split_mask = {name: var_names_to_values[get_mask_name(name)] for name in names}
     mask = opaque_params.join(split_mask)
     updated_values[get_mask_name(opaque_params_name)] = mask
     # Add remaining variables to new dict.
+    all_names = names + [get_mask_name(name) for name in names]
     for name, value in var_names_to_values.items():
-        if name in weight_names or name in bias_names:
+        if name in all_names:
             continue
         updated_values[name] = value
     return updated_values
@@ -257,9 +263,8 @@ def tensor_threshold(tensor, sparsity, mask=None):
     # we scale it accordingly.
     old_sparsity = tensor_sparsity_percent(mask) if mask is not None else 0.0
     sparsity_diff = sparsity - old_sparsity
-    if 0.0 > sparsity_diff > 100.0:
-        raise ValueError('new sparsity (%.2f%%) must be >= current sparsity (%.2f%%) and <= 100.0' % (
-            sparsity, old_sparsity))
+    if sparsity_diff < 0 or sparsity_diff > 100.0:
+        return 0.0
     percentile = sparsity_diff / (1.0 - old_sparsity/100.0)
     percentile = min(100.0, percentile)
 
