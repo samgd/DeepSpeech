@@ -56,9 +56,12 @@ def add_masks(out_ckpt, in_ckpt, to_mask, sparsity=0.0,
             than globally. This ensures that each layer is sparsity percent
             sparse rather than just the network as a whole.
     '''
-    var_names_to_values = get_values(in_ckpt, to_mask)
     if use_layerwise_threshold and opaque_params_name:
-        var_names_to_values = split_opaque(var_names_to_values, opaque_params_name)
+        var_names_to_values = get_and_split_opaque(in_ckpt, opaque_params_name)
+    else:
+        var_names_to_values = {}
+
+    var_names_to_values = get_values(in_ckpt, to_mask, var_names_to_values)
     if not use_layerwise_threshold:
         thresholds = global_threshold(var_names_to_values, to_mask, sparsity)
     else:
@@ -100,7 +103,7 @@ def update_masks(var_names_to_values, to_mask, thresholds):
         updated_values[mask_name] = np.abs(tensor) > thresholds[name]
     return updated_values
 
-def get_values(ckpt, to_mask):
+def get_values(ckpt, to_mask, extra_params=None):
     '''Return a dict of Tensor names in to_mask, and mask names, to values.'''
     reader = tf.train.NewCheckpointReader(ckpt)
     var_to_shape_map = reader.get_variable_to_shape_map()
@@ -108,7 +111,13 @@ def get_values(ckpt, to_mask):
     var_names_to_values = {}
     for name in var_to_shape_map:
         # Get Tensor and get or create mask.
-        tensor = reader.get_tensor(name)
+        if name in var_to_shape_map:
+            tensor = reader.get_tensor(name)
+        elif name in extra_params:
+            tensor = extra_params[name]
+        else:
+            raise ValueError('unable to get %r' % name)
+
         var_names_to_values[name] = tensor
 
         if name not in to_mask:
@@ -117,6 +126,8 @@ def get_values(ckpt, to_mask):
         mask_name = get_mask_name(name)
         if mask_name in var_to_shape_map:
             mask = reader.get_tensor(mask_name)
+        elif mask_name in extra_params:
+            mask = extra_params[mask_name]
         else:
             mask = np.ones(tensor.shape)
         # Store values to manipulate later.
@@ -124,7 +135,8 @@ def get_values(ckpt, to_mask):
 
     return var_names_to_values
 
-def split_opaque(var_names_to_values, opaque_params_name):
+def get_and_split_opaque(ckpt, opaque_params_name):
+    var_names_to_values = get_values(ckpt, [opaque_params_name])
     updated_values = {}
 
     params = var_names_to_values[opaque_params_name]
