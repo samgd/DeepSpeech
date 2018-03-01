@@ -82,7 +82,8 @@ def save_to_checkpoint(out_ckpt, var_names_to_values):
 def create_graph(var_names_to_values):
     tf.reset_default_graph()
     for name, value in var_names_to_values.items():
-        tf.get_variable(name, shape=value.shape)
+        dtype = tf.int32 if name == 'global_step' else tf.float32
+        tf.get_variable(name, shape=value.shape, dtype=dtype)
 
 def update_masks(var_names_to_values, to_mask, thresholds):
     updated_values = {}
