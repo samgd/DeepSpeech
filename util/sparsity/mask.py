@@ -55,17 +55,16 @@ def ckpt_layerwise_sparsity_percent(ckpt, to_mask, opaque_params_name=''):
     var_to_shape_map = reader.get_variable_to_shape_map()
 
     sparsity_percents = {}
-    for name in to_mask:
-        mask_name = get_mask_name(name)
-        if mask_name not in var_to_shape_map:
-            continue
-        mask = reader.get_tensor(mask_name)
-        if name != opaque_params_name:
+    for name in var_to_shape_map:
+        if name == opaque_params_name:
+            mask = reader.get_tensor(get_mask_name(name))
+            param_vals = split(mask)
+            for name, value in param_vals.items():
+                sparsity_percents[name] = tensor_sparsity_percent(value)
+        elif name in to_mask:
+            mask_name = get_mask_name(name)
+            mask = reader.get_tensor(mask_name)
             sparsity_percents[name] = tensor_sparsity_percent(mask)
-            continue
-        param_vals = split(mask)
-        for name, value in param_vals.items():
-            sparsity_percents[name] = tensor_sparsity_percent(value)
 
     return sparsity_percents
 
