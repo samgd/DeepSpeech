@@ -3,7 +3,7 @@ import tensorflow as tf
 
 from tensorflow.contrib.framework import assign_from_values
 
-from util.opaque_params import split
+from util.convert_params import opaque_to_canonical
 
 def get_mask_name(tensor_name):
     '''Return the name of the mask for a given a Tensor.'''
@@ -58,7 +58,7 @@ def ckpt_layerwise_sparsity_percent(ckpt, to_mask, opaque_params_name=''):
     for name in var_to_shape_map:
         if name == opaque_params_name:
             mask = reader.get_tensor(get_mask_name(name))
-            param_vals = split(mask)
+            param_vals = opaque_to_canonical(mask)
             for name, value in param_vals.items():
                 sparsity_percents[name] = tensor_sparsity_percent(value)
         elif name in to_mask:
