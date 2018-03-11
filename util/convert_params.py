@@ -84,16 +84,10 @@ FLAGS = tf.app.flags.FLAGS
 
 def main(_):
     var_names_to_values = get_tensors(FLAGS.in_ckpt)
-
-    var_names_to_values = to_canonical(FLAGS.in_format, var_names_to_values)
-
+    to_canonical(FLAGS.in_format, var_names_to_values)
     update_canonical_forget_bias(FLAGS.forget_bias_add, var_names_to_values)
-
-    var_names_to_values = from_canonical(FLAGS.out_format, var_names_to_values)
-
+    from_canonical(FLAGS.out_format, var_names_to_values)
     save_to_ckpt(FLAGS.out_ckpt, var_names_to_values)
-
-#- Main functions --------------------------------------------------------------
 
 def get_tensors(ckpt):
     '''Return a dict of name->value for all Tensors in the checkpoint.
@@ -125,7 +119,7 @@ def to_canonical(old_format, var_names_to_values):
         canonical format.
     '''
     if old_format == 'canonical':
-        return var_names_to_values
+        return
 
     if old_format == 'basic':
         split_p = re.compile('bidirectional_rnn/(fw|bw)/basic_lstm_cell/(kernel|bias)(/Adam|/Adam_1)?$')
@@ -148,7 +142,8 @@ def to_canonical(old_format, var_names_to_values):
                                                     postfix=match.group(3) or '',
                                                     forget_bias=forget_bias)
             new_names_to_values.update(tensors)
-        var_names_to_values = new_names_to_values
+        var_names_to_values.clear()
+        var_names_to_values.update(new_names_to_values)
     elif old_format == 'cudnn':
         cudnn_p = re.compile('fp32_storage/cudnn_lstm/opaque_kernel(/Adam(_1)?)?$')
 
@@ -159,14 +154,13 @@ def to_canonical(old_format, var_names_to_values):
                 continue
             new_names_to_values[name] = value
 
-        new_names_to_values.update(opaque_to_canonical(var_names_to_values))
-        new_names_to_values.update(opaque_to_canonical(var_names_to_values, postfix='/Adam'))
-        new_names_to_values.update(opaque_to_canonical(var_names_to_values, postfix='/Adam_1'))
-        var_names_to_values = new_names_to_values
+        new_names_to_values.update(cudnn_to_canonical(var_names_to_values))
+        new_names_to_values.update(cudnn_to_canonical(var_names_to_values, postfix='/Adam'))
+        new_names_to_values.update(cudnn_to_canonical(var_names_to_values, postfix='/Adam_1'))
+        var_names_to_values.clear()
+        var_names_to_values.update(new_names_to_values)
     else:
         raise ValueError('unknown old_format %r' % old_format)
-
-    return var_names_to_values
 
 def update_canonical_forget_bias(forget_bias_add, var_names_to_values):
     '''Add forget_bias_add to the forward and backward forget gate biases.
@@ -193,7 +187,7 @@ def from_canonical(new_format, var_names_to_values):
         new_format format.
     '''
     if new_format == 'canonical':
-        return var_names_to_values
+        return
 
     if new_format == 'cudnn':
         lstm_p = re.compile('(bw|fw)_(b_)?(R|W)(i|c|o|f)(/Adam|/Adam_1)?$')
@@ -206,21 +200,20 @@ def from_canonical(new_format, var_names_to_values):
             new_names_to_values[name] = value
 
         kernel_name = 'fp32_storage/cudnn_lstm/opaque_kernel'
-        new_names_to_values[kernel_name] = canonical_to_opaque(var_names_to_values)
+        new_names_to_values[kernel_name] = canonical_to_cudnn(var_names_to_values)
 
-        opaque = canonical_to_opaque(var_names_to_values, postfix='/Adam')
-        new_names_to_values[kernel_name + '/Adam'] = opaque
+        cudnn = canonical_to_cudnn(var_names_to_values, postfix='/Adam')
+        new_names_to_values[kernel_name + '/Adam'] = cudnn
 
-        opaque = canonical_to_opaque(var_names_to_values, postfix='/Adam_1')
-        new_names_to_values[kernel_name + '/Adam_1'] = opaque
+        cudnn = canonical_to_cudnn(var_names_to_values, postfix='/Adam_1')
+        new_names_to_values[kernel_name + '/Adam_1'] = cudnn
 
-        var_names_to_values = new_names_to_values
+        var_names_to_values.clear()
+        var_names_to_values.update(new_names_to_values)
     elif new_format == 'basic':
         raise NotImplementedError
     else:
         raise ValueError('unknown new_format %r' % new_format)
-
-    return var_names_to_values
 
 def save_to_ckpt(ckpt, var_names_to_values):
     '''Save to out_ckpt.'''
@@ -234,31 +227,32 @@ def save_to_ckpt(ckpt, var_names_to_values):
         sess.run(assign_op, feed_dict)
         saver.save(sess, ckpt)
 
-#- LSTM conversion: canonical->opaque ------------------------------------------
+#- canonical -> cudnn ----------------------------------------------------------
 
-def canonical_to_opaque(var_names_to_values, postfix=''):
+def canonical_to_cudnn(var_names_to_values, postfix=''):
     '''
     '''
-    fwd_weights = canonical_to_opaque_weights(var_names_to_values,
-                                              prefix='fw_',
-                                              postfix=postfix)
-    bac_weights = canonical_to_opaque_weights(var_names_to_values,
-                                              prefix='bw_',
-                                              postfix=postfix)
+    fwd_weights = canonical_to_cudnn_weights(var_names_to_values,
+                                             prefix='fw_',
+                                             postfix=postfix)
+    bac_weights = canonical_to_cudnn_weights(var_names_to_values,
+                                             prefix='bw_',
+                                             postfix=postfix)
 
-    fwd_biases = canonical_to_opaque_biases(var_names_to_values,
-                                            prefix='fw_',
-                                            postfix=postfix)
-    bac_biases = canonical_to_opaque_biases(var_names_to_values,
-                                            prefix='bw_',
-                                            postfix=postfix)
+    fwd_biases = canonical_to_cudnn_biases(var_names_to_values,
+                                           prefix='fw_',
+                                           postfix=postfix)
+    bac_biases = canonical_to_cudnn_biases(var_names_to_values,
+                                           prefix='bw_',
+                                           postfix=postfix)
 
-    opaque_params = np.concatenate([fwd_weights, bac_weights,
-                                    fwd_biases, bac_biases])
+    cudnn_params = np.concatenate([fwd_weights, bac_weights,
+                                   fwd_biases, bac_biases])
 
-    return opaque_params
+    return cudnn_params
 
-def canonical_to_opaque_weights(var_names_to_values, n_units=2048, n_input=4096, prefix='', postfix=''):
+def canonical_to_cudnn_weights(var_names_to_values, n_units=2048, n_input=4096,
+                               prefix='', postfix=''):
     '''
     '''
     weight_shapes = get_weight_shapes(prefix, n_units, n_input, postfix)
@@ -268,7 +262,7 @@ def canonical_to_opaque_weights(var_names_to_values, n_units=2048, n_input=4096,
         weights = np.concatenate([weights, values.flatten()])
     return weights
 
-def canonical_to_opaque_biases(var_names_to_values, prefix='', postfix=''):
+def canonical_to_cudnn_biases(var_names_to_values, prefix='', postfix=''):
     '''
     '''
     bias_names = get_bias_names(prefix, postfix)
@@ -278,20 +272,20 @@ def canonical_to_opaque_biases(var_names_to_values, prefix='', postfix=''):
         biases = np.concatenate([biases, values.flatten()])
     return biases
 
-#- LSTM conversion: opaque->canonical ------------------------------------------
+#- cudnn -> canonical ----------------------------------------------------------
 
-def opaque_to_canonical(var_names_to_values, n_units=2048, n_input=4096, postfix=''):
+def cudnn_to_canonical(var_names_to_values, n_units=2048, n_input=4096, postfix=''):
     '''TODO: Update this docstring
 
-    Return a map of name->ndarray for each parameter in opaque_params.
+    Return a map of name->ndarray for each parameter in cudnn_params.
 
     Args:
-        opaque_params: Single-layer, bidirectional CudnnLSTM parameter blob.
+        cudnn_params: Single-layer, bidirectional CudnnLSTM parameter blob.
         n_units: Number of units in CudnnLSTM.
         n_input: Input size to CudnnLSTM.
 
     Returns:
-        Map of name->ndarray for each of the tensors in the opaque_params blob.
+        Map of name->ndarray for each of the tensors in the cudnn_params blob.
         The parameter names in the map are:
 
             ['Wi', 'Ri', 'b_Wi', 'b_Ri'
@@ -310,29 +304,29 @@ def opaque_to_canonical(var_names_to_values, n_units=2048, n_input=4096, postfix
             http://docs.nvidia.com/deeplearning/sdk/cudnn-developer-guide/index.html#cudnnRNNMode_t
     '''
     kernel_name = 'fp32_storage/cudnn_lstm/opaque_kernel' + postfix
-    opaque_params = var_names_to_values[kernel_name]
+    cudnn_params = var_names_to_values[kernel_name]
 
     # Weights.
     fwd_bac_weight_split = 4*n_units*n_input + 4*n_units*n_units
     weight_end = 2*fwd_bac_weight_split
-    fwd_weights = opaque_params[:fwd_bac_weight_split]
-    bac_weights = opaque_params[fwd_bac_weight_split:weight_end]
+    fwd_weights = cudnn_params[:fwd_bac_weight_split]
+    bac_weights = cudnn_params[fwd_bac_weight_split:weight_end]
 
     param_vals = {}
-    param_vals.update(opaque_to_canonical_weights(fwd_weights, prefix='fw_', postfix=postfix))
-    param_vals.update(opaque_to_canonical_weights(bac_weights, prefix='bw_', postfix=postfix))
+    param_vals.update(cudnn_to_canonical_weights(fwd_weights, prefix='fw_', postfix=postfix))
+    param_vals.update(cudnn_to_canonical_weights(bac_weights, prefix='bw_', postfix=postfix))
 
     # Biases.
     fwd_bac_bias_split = 8*n_units
-    fwd_biases = opaque_params[weight_end:weight_end+fwd_bac_bias_split]
-    bac_biases = opaque_params[weight_end+fwd_bac_bias_split:]
+    fwd_biases = cudnn_params[weight_end:weight_end+fwd_bac_bias_split]
+    bac_biases = cudnn_params[weight_end+fwd_bac_bias_split:]
 
-    param_vals.update(opaque_to_canonical_biases(fwd_biases, prefix='fw_', postfix=postfix))
-    param_vals.update(opaque_to_canonical_biases(bac_biases, prefix='bw_', postfix=postfix))
+    param_vals.update(cudnn_to_canonical_biases(fwd_biases, prefix='fw_', postfix=postfix))
+    param_vals.update(cudnn_to_canonical_biases(bac_biases, prefix='bw_', postfix=postfix))
 
     return param_vals
 
-def opaque_to_canonical_weights(weights, n_units=2048, n_input=4096, prefix='', postfix=''):
+def cudnn_to_canonical_weights(weights, n_units=2048, n_input=4096, prefix='', postfix=''):
     '''Return a map of name->ndarray for each weight in weights.
 
     Args:
@@ -354,7 +348,7 @@ def opaque_to_canonical_weights(weights, n_units=2048, n_input=4096, prefix='', 
 
     return weight_vals
 
-def opaque_to_canonical_biases(biases, n_units=2048, prefix='', postfix=''):
+def cudnn_to_canonical_biases(biases, n_units=2048, prefix='', postfix=''):
     '''Return a map of name->ndarray for each bias in biases.
 
     Args:
@@ -373,7 +367,7 @@ def opaque_to_canonical_biases(biases, n_units=2048, prefix='', postfix=''):
 
     return bias_vals
 
-#- LSTM conversion: basic->canonical -------------------------------------------
+#- basic -> canonical ----------------------------------------------------------
 
 def basic_to_canonical_weights(weights, n_units=2048, n_input=4096, prefix='', postfix=''):
     '''
@@ -410,9 +404,7 @@ def basic_to_canonical_biases(biases, n_units=2048, n_input=4096,
 
     return params
 
-#- LSTM conversion: canonical->basic -------------------------------------------
-
-# TODO
+#- TODO: canonical -> basic ----------------------------------------------------
 
 #-------------------------------------------------------------------------------
 
