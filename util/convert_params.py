@@ -4,18 +4,23 @@ import tensorflow as tf
 
 from tensorflow.contrib.framework import assign_from_values
 
-tf.app.flags.DEFINE_string  ('in_ckpt',  '',      'checkpoint to read Tensor values from')
-tf.app.flags.DEFINE_string  ('out_ckpt', '',      'checkpoint to write Tensor values to')
-tf.app.flags.DEFINE_string  ('in_type',  'basic', '')
-tf.app.flags.DEFINE_string  ('out_type', 'cudnn', '')
+tf.app.flags.DEFINE_string ('in_ckpt',         '',      'checkpoint to read Tensor values from')
+tf.app.flags.DEFINE_string ('out_ckpt',        '',      'checkpoint to write Tensor values to')
+tf.app.flags.DEFINE_string ('in_type',         'basic', '')
+tf.app.flags.DEFINE_string ('out_type',        'cudnn', '')
+tf.app.flags.DEFINE_float  ('forget_bias_add', 0.0,     'value to add to forget gate Tensor - Adam Tensor values are not changed')
 
 FLAGS = tf.app.flags.FLAGS
 
 def main(_):
-    # Ensure conversion is not a NOP.
     var_names_to_values = get_tensors(FLAGS.in_ckpt)
+
     var_names_to_values = type_to_canonical(FLAGS.in_type, var_names_to_values)
+
+    update_canonical_forget_bias(FLAGS.forget_bias_add, var_names_to_values)
+
     var_names_to_values = canonical_to_type(FLAGS.out_type, var_names_to_values)
+
     save_to_ckpt(FLAGS.out_ckpt, var_names_to_values)
 
 #- Main functions --------------------------------------------------------------
@@ -92,6 +97,18 @@ def type_to_canonical(old_type, var_names_to_values):
         raise ValueError('unknown old_type %r' % old_type)
 
     return var_names_to_values
+
+def update_canonical_forget_bias(forget_bias_add, var_names_to_values):
+    '''Add forget_bias_add to the forward and backward forget gate biases.
+
+    Note: Adam values are not changed.
+
+    Args:
+        forget_bias_add: Value added to forget gate biases.
+        var_names_to_values: Canonical parameter dictonary.
+    '''
+    var_names_to_values['fw_b_Wf'] += forget_bias_add
+    var_names_to_values['bw_b_Wf'] += forget_bias_add
 
 def canonical_to_type(new_type, var_names_to_values):
     '''Return an updated dict with the LSTM parameters in the given format.

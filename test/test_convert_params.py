@@ -1,5 +1,5 @@
-    # TODO: Document all three formats.
-    # TODO: Forget bias
+    # TODO: Document all three formats
+    # TODO: Modify dicts in place
     # TODO: DRY init
     # TODO: ensure ADAM converts too
     # TODO: global constant for names
@@ -152,13 +152,13 @@ class TestConvertParams(unittest.TestCase):
         var_names_to_values = copy.deepcopy(self.canonical_params)
         new_params = convert_params.type_to_canonical('canonical',
                                                       var_names_to_values)
-        self.conversion_test(new_params, self.canonical_params)
+        self.parameter_equality(new_params, self.canonical_params)
 
     def test_old_type_cudnn(self):
         '''Check cudnn to canonical conversion.'''
         new_params = convert_params.type_to_canonical('cudnn',
                                                       self.cudnn_params)
-        self.conversion_test(new_params, self.canonical_params)
+        self.parameter_equality(new_params, self.canonical_params)
 
     def test_old_type_basic(self):
         '''TODO: This is a lossy conversion as canonical params two biases,
@@ -177,7 +177,7 @@ class TestConvertParams(unittest.TestCase):
                     self.canonical_params[input_name] += hidden_value
                     self.canonical_params[hidden_name] = np.zeros(hidden_value.shape)
 
-        self.conversion_test(new_params, self.canonical_params)
+        self.parameter_equality(new_params, self.canonical_params)
 
     #- Canonical -> new_type tests ---------------------------------------------
 
@@ -187,23 +187,39 @@ class TestConvertParams(unittest.TestCase):
         var_names_to_values = copy.deepcopy(self.canonical_params)
         new_params = convert_params.canonical_to_type('canonical',
                                                       var_names_to_values)
-        self.conversion_test(new_params, self.canonical_params)
+        self.parameter_equality(new_params, self.canonical_params)
 
     def test_new_type_cudnn(self):
         '''Check canonical to cudnn conversion.'''
         new_params = convert_params.canonical_to_type('cudnn',
                                                       self.canonical_params)
-        self.conversion_test(new_params, self.cudnn_params)
+        self.parameter_equality(new_params, self.cudnn_params)
 
     def test_new_type_basic(self):
         '''Check canonical to basic conversion.'''
         new_params = convert_params.canonical_to_type('basic',
                                                       self.canonical_params)
-        self.conversion_test(new_params, self.basic_params)
+        self.parameter_equality(new_params, self.basic_params)
 
-    #---------------------------------------------------------------------------
+    #- Other -------------------------------------------------------------------
 
-    def conversion_test(self, new_params, exp_params):
+    def test_update_canonical_forget_bias(self):
+        '''Check forget bias is added to forget gates only.'''
+        for _ in range(10):
+            bias_add = np.random.uniform(-10.0, 10.0)
+
+            exp_canonical = copy.deepcopy(self.canonical_params)
+            exp_canonical['fw_b_Wf'] += bias_add
+            exp_canonical['bw_b_Wf'] += bias_add
+
+            new_params = copy.deepcopy(self.canonical_params)
+            convert_params.update_canonical_forget_bias(bias_add, new_params)
+
+            self.parameter_equality(new_params, exp_canonical)
+
+    #- Helpers -----------------------------------------------------------------
+
+    def parameter_equality(self, new_params, exp_params):
         '''Ensure new_params and exp_params are exactly equal.'''
         # Ensure nothing lost or added.
         self.assertListEqual(sorted(exp_params.keys()),
