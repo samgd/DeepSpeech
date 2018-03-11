@@ -1,3 +1,73 @@
+'''Convert a single-layer bidirectional LSTM in a TensorFlow checkpoint from
+one format to another where the possible formats are:
+
+    'basic': TensorFlow format (i.e. BasicLSTM)
+    'cudnn': NVIDIA format (i.e. CudnnLSTM)
+    'canonical': Canonical format.
+
+
+Given an input size of 'n_input' and a hidden size of 'n_unit':
+
+'basic' format LSTM parameter name and shapes:
+
+    - 'bidirectional_rnn/fw/basic_lstm_cell/kernel'
+    - 'bidirectional_rnn/bw/basic_lstm_cell/kernel'
+    - 'bidirectional_rnn/fw/basic_lstm_cell/bias'
+    - 'bidirectional_rnn/bw/basic_lstm_cell/bias'
+
+    - Kernel shape: (n_input + n_unit, 4 * n_unit)
+        - Input and hidden state vectors are stacked multiplied by this kernel
+          to compute part of the new (input, c/gate, forget, output)
+          pre-activation gate values.
+    - Bias shape: (4 * n_unit,)
+        - A set of biases for each gate, stacked into one vector, used to
+          compute the new pre-activation gate values.
+
+'cudnn' format LSTM parameter names and shapes:
+
+    - 'fp32_storage/cudnn_lstm/opaque_kernel'
+
+    - Shape: (2 * (4 * (n_input * n_unit) + 4 * (n_unit * n_unit) + 8 * n_unit),)
+        - Two directions (forward and backward) where the new pre-activation
+          gate values (input, forget, c/gate, output) are computed using 4
+          matrices acting on the input vector, 4 matrices acting on the hidden
+          state, and 8 biases (two for each of the four gates).
+
+'canonical' format LSTM parameter names and shapes:
+
+    - 'fw_Wi', 'fw_Wf', 'fw_Wc', 'fw_Wo'
+    - 'fw_Ri', 'fw_Rf', 'fw_Rc', 'fw_Ro'
+    - 'bw_Wi', 'bw_Wf', 'bw_Wc', 'bw_Wo'
+    - 'bw_Ri', 'bw_Rf', 'bw_Rc', 'bw_Ro'
+
+    - 'fw_b_Wi', 'fw_b_Wf', 'fw_b_Wc', 'fw_b_Wo'
+    - 'fw_b_Ri', 'fw_b_Rf', 'fw_b_Rc', 'fw_b_Ro'
+    - 'bw_b_Wi', 'bw_b_Wf', 'bw_b_Wc', 'bw_b_Wo'
+    - 'bw_b_Ri', 'bw_b_Rf', 'bw_b_Rc', 'bw_b_Ro'
+
+    - Forward + Backward Input Kernel Shape ([fb]w_W[ifco]): (n_input, n_unit)
+    - Forward + Backward Hidden Kernel Shape ([fb]w_R[ifco]): (n_unit, n_unit)
+    - Forward + Backward Input Bias Shape ([fb]w_b_W[ifco]): (n_unit,)
+    - Forward + Backward Input Bias Shape ([fb]w_b_R[ifco]): (n_unit,)
+
+
+If Adam is used as the optimizer Tensors with names equal to the above but with
+both '/Adam' and '/Adam_1' appended will also be present.
+
+
+The 'basic' format has a single bias for each of the 4 gates (input, forget,
+output, c/gate) whereas the 'cudnn' and 'canonical' formats have two for each
+gate.  Converting to the 'basic' format is thus a lossy operation - the total
+bias value is equal but the relative split information is lost.
+
+
+The BasicLSTM in TensorFlow, which utilizes the 'basic' parameter format, has a
+function parameter that allows a bias to be added to the forget gate during
+run-time.  The CudnnLSTM RNN, using the 'cudnn' format, does not have this
+and thus the desired forget gate bias must be added to the forget gate values
+stored in the checkpoint before use. A flag is provided to do this.
+'''
+
 import numpy as np
 import re
 import tensorflow as tf
@@ -6,8 +76,8 @@ from tensorflow.contrib.framework import assign_from_values
 
 tf.app.flags.DEFINE_string ('in_ckpt',         '',      'checkpoint to read Tensor values from')
 tf.app.flags.DEFINE_string ('out_ckpt',        '',      'checkpoint to write Tensor values to')
-tf.app.flags.DEFINE_string ('in_type',         'basic', '')
-tf.app.flags.DEFINE_string ('out_type',        'cudnn', '')
+tf.app.flags.DEFINE_string ('in_format',       'basic', '')
+tf.app.flags.DEFINE_string ('out_format',      'cudnn', '')
 tf.app.flags.DEFINE_float  ('forget_bias_add', 0.0,     'value to add to forget gate Tensor - Adam Tensor values are not changed')
 
 FLAGS = tf.app.flags.FLAGS
@@ -15,11 +85,11 @@ FLAGS = tf.app.flags.FLAGS
 def main(_):
     var_names_to_values = get_tensors(FLAGS.in_ckpt)
 
-    var_names_to_values = type_to_canonical(FLAGS.in_type, var_names_to_values)
+    var_names_to_values = to_canonical(FLAGS.in_format, var_names_to_values)
 
     update_canonical_forget_bias(FLAGS.forget_bias_add, var_names_to_values)
 
-    var_names_to_values = canonical_to_type(FLAGS.out_type, var_names_to_values)
+    var_names_to_values = from_canonical(FLAGS.out_format, var_names_to_values)
 
     save_to_ckpt(FLAGS.out_ckpt, var_names_to_values)
 
@@ -42,22 +112,22 @@ def get_tensors(ckpt):
         var_names_to_values[name] = reader.get_tensor(name)
     return var_names_to_values
 
-def type_to_canonical(old_type, var_names_to_values):
+def to_canonical(old_format, var_names_to_values):
     '''Return an updated dict with the LSTM parameters in the canonical format.
 
     Args:
-        old_type: Type of parameter set found in var_names_to_values. Can be
-            any of ['basic', 'cudnn', 'canonical'].
+        old_format: Format of parameter set found in var_names_to_values. Can
+            be any of ['basic', 'cudnn', 'canonical'].
         var_names_to_values: Dict of name->value.
 
     Returns:
         Updated name->value dict with the LSTM parameters converted to the
         canonical format.
     '''
-    if old_type == 'canonical':
+    if old_format == 'canonical':
         return var_names_to_values
 
-    if old_type == 'basic':
+    if old_format == 'basic':
         split_p = re.compile('bidirectional_rnn/(fw|bw)/basic_lstm_cell/(kernel|bias)(/Adam|/Adam_1)?$')
 
         new_names_to_values = {}
@@ -79,7 +149,7 @@ def type_to_canonical(old_type, var_names_to_values):
                                                     forget_bias=forget_bias)
             new_names_to_values.update(tensors)
         var_names_to_values = new_names_to_values
-    elif old_type == 'cudnn':
+    elif old_format == 'cudnn':
         cudnn_p = re.compile('fp32_storage/cudnn_lstm/opaque_kernel(/Adam(_1)?)?$')
 
         new_names_to_values = {}
@@ -94,7 +164,7 @@ def type_to_canonical(old_type, var_names_to_values):
         new_names_to_values.update(opaque_to_canonical(var_names_to_values, postfix='/Adam_1'))
         var_names_to_values = new_names_to_values
     else:
-        raise ValueError('unknown old_type %r' % old_type)
+        raise ValueError('unknown old_format %r' % old_format)
 
     return var_names_to_values
 
@@ -110,22 +180,22 @@ def update_canonical_forget_bias(forget_bias_add, var_names_to_values):
     var_names_to_values['fw_b_Wf'] += forget_bias_add
     var_names_to_values['bw_b_Wf'] += forget_bias_add
 
-def canonical_to_type(new_type, var_names_to_values):
+def from_canonical(new_format, var_names_to_values):
     '''Return an updated dict with the LSTM parameters in the given format.
 
     Args:
-        new_type: Type of parameter set to convert the LSTM parameters in
+        new_format: Type of parameter set to convert the LSTM parameters in
             var_names_to_values to. Can be any of ['basic', 'cudnn', 'canonical'].
         var_names_to_values: Dict of name->value.
 
     Returns:
         Updated name->value dict with the LSTM parameters converted to the
-        new_type format.
+        new_format format.
     '''
-    if new_type == 'canonical':
+    if new_format == 'canonical':
         return var_names_to_values
 
-    if new_type == 'cudnn':
+    if new_format == 'cudnn':
         lstm_p = re.compile('(bw|fw)_(b_)?(R|W)(i|c|o|f)(/Adam|/Adam_1)?$')
 
         new_names_to_values = {}
@@ -145,10 +215,10 @@ def canonical_to_type(new_type, var_names_to_values):
         new_names_to_values[kernel_name + '/Adam_1'] = opaque
 
         var_names_to_values = new_names_to_values
-    elif new_type == 'basic':
+    elif new_format == 'basic':
         raise NotImplementedError
     else:
-        raise ValueError('unknown new_type %r' % new_type)
+        raise ValueError('unknown new_format %r' % new_format)
 
     return var_names_to_values
 
