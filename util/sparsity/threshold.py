@@ -2,15 +2,14 @@ import numpy as np
 import tensorflow as tf
 import sys
 
-import util.opaque_params as opaque_params
-
 from tensorflow.contrib.framework import assign_from_values
 
+from util import convert_params
 from util.sparsity.mask import get_mask_name
 from util.sparsity.mask import tensor_sparsity_percent
 
 def layerwise_add_masks_limit(out_ckpt, in_ckpt, to_mask, limit_sparsity=0.0,
-                              opaque_params_name=''):
+                              cudnn_params_name=''):
     '''Add masks for variables in to_mask to out_ckpt up to limit_sparsity.'''
     # Get names of variables whose sparsity is less than limit_sparsity.
     reader = tf.train.NewCheckpointReader(in_ckpt)
@@ -34,11 +33,11 @@ def layerwise_add_masks_limit(out_ckpt, in_ckpt, to_mask, limit_sparsity=0.0,
               to_increase,
               sparsity=limit_sparsity,
               use_layerwise_threshold=True,
-              opaque_params_name=opaque_params_name)
+              cudnn_params_name=cudnn_params_name)
 
 def add_masks(out_ckpt, in_ckpt, to_mask, sparsity=0.0,
               use_layerwise_threshold=False,
-              opaque_params_name=''):
+              cudnn_params_name=''):
     '''Add masks for variables in to_mask to out_ckpt based on sparsity percent.
 
     The sparsity of masks already present in in_ckpt is taken into account -
@@ -56,9 +55,9 @@ def add_masks(out_ckpt, in_ckpt, to_mask, sparsity=0.0,
             than globally. This ensures that each layer is sparsity percent
             sparse rather than just the network as a whole.
     '''
-    if use_layerwise_threshold and opaque_params_name:
-        var_names_to_values = get_and_split_opaque(in_ckpt, opaque_params_name)
-        ignore_params = [opaque_params_name, get_mask_name(opaque_params_name)]
+    if use_layerwise_threshold and cudnn_params_name:
+        var_names_to_values = get_and_split_cudnn(in_ckpt, cudnn_params_name)
+        ignore_params = [cudnn_params_name, get_mask_name(cudnn_params_name)]
     else:
         var_names_to_values = {}
         ignore_params = []
@@ -68,8 +67,8 @@ def add_masks(out_ckpt, in_ckpt, to_mask, sparsity=0.0,
     else:
         thresholds = layerwise_threshold(var_names_to_values, to_mask, sparsity)
     var_names_to_values = update_masks(var_names_to_values, to_mask, thresholds)
-    if use_layerwise_threshold and opaque_params_name:
-        var_names_to_values = join_opaque(var_names_to_values, opaque_params_name)
+    if use_layerwise_threshold and cudnn_params_name:
+        var_names_to_values = join_cudnn(var_names_to_values, cudnn_params_name)
     create_graph(var_names_to_values)
     save_to_checkpoint(out_ckpt, var_names_to_values)
 
@@ -143,39 +142,39 @@ def get_values(ckpt, to_mask, extra_params=None, ignore_params=None):
 
     return var_names_to_values
 
-def get_and_split_opaque(ckpt, opaque_params_name):
-    var_names_to_values = get_values(ckpt, [opaque_params_name])
+def get_and_split_cudnn(ckpt, cudnn_params_name):
+    var_names_to_values = get_values(ckpt, [cudnn_params_name])
     updated_values = {}
 
-    params = var_names_to_values[opaque_params_name]
-    updated_values.update(opaque_params.split(params))
+    params = var_names_to_values[cudnn_params_name]
+    updated_values.update(convert_params.cudnn_to_canonical(params))
 
-    mask = var_names_to_values[get_mask_name(opaque_params_name)]
-    split_mask = opaque_params.split(mask)
+    mask = var_names_to_values[get_mask_name(cudnn_params_name)]
+    split_mask = convert_params.cudnn_to_canonical(mask)
     split_mask = {get_mask_name(name): val for name, val in split_mask.items()}
     updated_values.update(split_mask)
 
     for name, value in var_names_to_values.items():
-        if name == opaque_params_name:
+        if name == cudnn_params_name:
             continue
         updated_values[name] = value
 
     return updated_values
 
-def join_opaque(var_names_to_values, opaque_params_name):
+def join_cudnn(var_names_to_values, cudnn_params_name):
     updated_values = {}
     # Reconstruct parameter blob.
-    weight_shapes = opaque_params.get_weight_shapes('fw_')
-    weight_shapes.extend(opaque_params.get_weight_shapes('bw_'))
+    weight_shapes = convert_params.get_weight_shapes('fw_')
+    weight_shapes.extend(convert_params.get_weight_shapes('bw_'))
     names = [name for name, _ in weight_shapes]
-    names.extend(opaque_params.get_bias_names('fw_'))
-    names.extend(opaque_params.get_bias_names('bw_'))
+    names.extend(convert_params.get_bias_names('fw_'))
+    names.extend(convert_params.get_bias_names('bw_'))
     split_params = {name: var_names_to_values[name] for name in names}
-    updated_values[opaque_params_name] = opaque_params.join(split_params)
+    updated_values[cudnn_params_name] = convert_params.cudnn_to_canonical(split_params)
     # Reconstruct parameter blob mask.
     split_mask = {name: var_names_to_values[get_mask_name(name)] for name in names}
-    mask = opaque_params.join(split_mask)
-    updated_values[get_mask_name(opaque_params_name)] = mask
+    mask = convert_params.cudnn_to_canonical(split_mask)
+    updated_values[get_mask_name(cudnn_params_name)] = mask
     # Add remaining variables to new dict.
     all_names = names + [get_mask_name(name) for name in names]
     for name, value in var_names_to_values.items():

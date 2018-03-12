@@ -3,7 +3,7 @@ import tensorflow as tf
 
 from tensorflow.contrib.framework import assign_from_values
 
-from util.convert_params import opaque_to_canonical
+from util.convert_params import to_canonical
 
 def get_mask_name(tensor_name):
     '''Return the name of the mask for a given a Tensor.'''
@@ -49,16 +49,16 @@ def tensor_sparsity_percent(tensor):
     '''Returns sparsity % of a given Tensor.'''
     return (float(np.sum(tensor == 0)) / tensor.size) * 100
 
-def ckpt_layerwise_sparsity_percent(ckpt, to_mask, opaque_params_name=''):
+def ckpt_layerwise_sparsity_percent(ckpt, to_mask, cudnn_params_name=''):
     '''Return the sparsity percentage of each name in to_mask.'''
     reader = tf.train.NewCheckpointReader(ckpt)
     var_to_shape_map = reader.get_variable_to_shape_map()
 
     sparsity_percents = {}
     for name in var_to_shape_map:
-        if name == opaque_params_name:
+        if name == cudnn_params_name:
             mask = reader.get_tensor(get_mask_name(name))
-            param_vals = opaque_to_canonical(mask)
+            param_vals = to_canonical(mask, 'cudnn')
             for name, value in param_vals.items():
                 sparsity_percents[name] = tensor_sparsity_percent(value)
         elif name in to_mask:
