@@ -45,7 +45,7 @@ Given an input size of 'n_input' and a hidden size of 'n_unit':
     - 'bw_b_Wi', 'bw_b_Wf', 'bw_b_Wc', 'bw_b_Wo'
     - 'bw_b_Ri', 'bw_b_Rf', 'bw_b_Rc', 'bw_b_Ro'
 
-    - Forward + Backward Input Kernel Shape ([fb]w_W[ifco]): (n_input, n_unit)
+    - Forward + Backward Input Kernel Shape ([fb]w_W[ifco]): (n_unit, n_input)
     - Forward + Backward Hidden Kernel Shape ([fb]w_R[ifco]): (n_unit, n_unit)
     - Forward + Backward Input Bias Shape ([fb]w_b_W[ifco]): (n_unit,)
     - Forward + Backward Input Bias Shape ([fb]w_b_R[ifco]): (n_unit,)
@@ -135,12 +135,9 @@ def to_canonical(old_format, var_names_to_values):
                                                      prefix=match.group(1) +  '_',
                                                      postfix=match.group(3) or '')
             elif match.group(2) == 'bias':
-                # Add forget bias to parameters only, not Adam.
-                forget_bias = 0.0 # TODO: int(match.group(3) is None)
                 tensors = basic_to_canonical_biases(value,
                                                     prefix=match.group(1) + '_',
-                                                    postfix=match.group(3) or '',
-                                                    forget_bias=forget_bias)
+                                                    postfix=match.group(3) or '')
             new_names_to_values.update(tensors)
         var_names_to_values.clear()
         var_names_to_values.update(new_names_to_values)
@@ -372,12 +369,16 @@ def cudnn_to_canonical_biases(biases, n_units=2048, prefix='', postfix=''):
 def basic_to_canonical_weights(weights, n_units=2048, n_input=4096, prefix='', postfix=''):
     '''
     '''
-    W_i, W_c, W_f, W_o = np.split(weights, 4, axis=1)
+    if weights.shape[0] != 4 * n_units:
+        weights = weights.T
+    assert weights.shape == (4 * n_units, n_input + n_units)
 
-    w_i, r_i, _ = np.split(W_i, [n_input, n_input + n_units], axis=0)
-    w_c, r_c, _ = np.split(W_c, [n_input, n_input + n_units], axis=0)
-    w_f, r_f, _ = np.split(W_f, [n_input, n_input + n_units], axis=0)
-    w_o, r_o, _ = np.split(W_o, [n_input, n_input + n_units], axis=0)
+    W_i, W_c, W_f, W_o = np.split(weights, 4, axis=0)
+
+    w_i, r_i, _ = np.split(W_i, [n_input, n_input + n_units], axis=1)
+    w_c, r_c, _ = np.split(W_c, [n_input, n_input + n_units], axis=1)
+    w_f, r_f, _ = np.split(W_f, [n_input, n_input + n_units], axis=1)
+    w_o, r_o, _ = np.split(W_o, [n_input, n_input + n_units], axis=1)
 
     params = {'Wi': w_i, 'Wf': w_f, 'Wc': w_c, 'Wo': w_o,
               'Ri': r_i, 'Rf': r_f, 'Rc': r_c, 'Ro': r_o}
@@ -385,8 +386,7 @@ def basic_to_canonical_weights(weights, n_units=2048, n_input=4096, prefix='', p
 
     return params
 
-def basic_to_canonical_biases(biases, n_units=2048, n_input=4096,
-                              prefix='', postfix='', forget_bias=1.0):
+def basic_to_canonical_biases(biases, n_units=2048, n_input=4096, prefix='', postfix=''):
     '''
     '''
     B_i, B_c, B_f, B_o = np.split(biases, 4, axis=0)
@@ -395,7 +395,7 @@ def basic_to_canonical_biases(biases, n_units=2048, n_input=4096,
 
     b_wi, b_ri = B_i, np.zeros(shape)
     b_wc, b_rc = B_c, np.zeros(shape)
-    b_wf, b_rf = B_f + np.full(shape, forget_bias), np.zeros(shape)
+    b_wf, b_rf = B_f, np.zeros(shape)
     b_wo, b_ro = B_o, np.zeros(shape)
 
     params = {'b_Wi': b_wi, 'b_Wf': b_wf, 'b_Wc': b_wc, 'b_Wo': b_wo,
@@ -411,10 +411,10 @@ def basic_to_canonical_biases(biases, n_units=2048, n_input=4096,
 def get_weight_shapes(prefix, n_units=2048, n_input=4096, postfix=''):
     '''
     '''
-    weight_shapes = [('Wi', (n_input, n_units)),
-                     ('Wf', (n_input, n_units)),
-                     ('Wc', (n_input, n_units)),
-                     ('Wo', (n_input, n_units)),
+    weight_shapes = [('Wi', (n_units, n_input)),
+                     ('Wf', (n_units, n_input)),
+                     ('Wc', (n_units, n_input)),
+                     ('Wo', (n_units, n_input)),
                      ('Ri', (n_units, n_units)),
                      ('Rf', (n_units, n_units)),
                      ('Rc', (n_units, n_units)),

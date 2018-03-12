@@ -25,6 +25,12 @@ class TestConvertParams(unittest.TestCase):
         self.init_basic_params()
         self.add_non_lstm_values()
 
+    def tearDown(self):
+        '''Clear parameter dictionaries to prevent a memory leak.'''
+        self.cudnn_params.clear()
+        self.canonical_params.clear()
+        self.basic_params.clear()
+
     def init_cudnn_params(self):
         '''Initialize random cudnn_params blob.'''
         self.cudnn_size_weight = (4*self.n_input*self.n_units +
@@ -69,7 +75,7 @@ class TestConvertParams(unittest.TestCase):
             cudnn_params = self.cudnn_params[self.cudnn_params_name + postfix]
 
             # Get weights.
-            shapes = (4 * [(self.n_input, self.n_units)] +
+            shapes = (4 * [(self.n_units, self.n_input)] +
                       4 * [(self.n_units, self.n_units)])
             splits = np.cumsum([np.prod(shape) for shape in shapes])
             all_weights = cudnn_params[:self.num_dirs * self.cudnn_size_weight]
@@ -113,12 +119,12 @@ class TestConvertParams(unittest.TestCase):
         for postfix in ['', '/Adam', '/Adam_1']:
             for direction in ['fw', 'bw']:
                 # Weights.
-                kernel = np.array([]).reshape(self.n_units + self.n_input, 0)
+                kernel = np.array([]).reshape(0, self.n_input + self.n_units)
                 for gate in ['i', 'c', 'f', 'o']:
                     input = self.canonical_params[direction + '_W' + gate + postfix]
                     hidden = self.canonical_params[direction + '_R' + gate + postfix]
-                    combined = np.vstack([input, hidden])
-                    kernel = np.hstack([kernel, combined])
+                    combined = np.hstack([input, hidden])
+                    kernel = np.vstack([kernel, combined])
                 self.basic_params[name % (direction, 'kernel', postfix)] = kernel
 
                 bias = np.array([])
@@ -127,7 +133,6 @@ class TestConvertParams(unittest.TestCase):
                     hidden = self.canonical_params[direction + '_b_R' + gate + postfix]
                     combined = input + hidden
                     bias = np.hstack([bias, combined])
-
                 self.basic_params[name % (direction, 'bias', postfix)] = bias
 
     def add_non_lstm_values(self):
@@ -220,6 +225,8 @@ class TestConvertParams(unittest.TestCase):
 
         # Ensure all values unchanged.
         for name, exp_value in exp_params.items():
+            if name[-4:] == 'Adam' or name[-6:] == 'Adam_1':
+                continue
             self.assertIn(name, new_params)
             act_value = new_params[name]
 
@@ -234,7 +241,7 @@ class TestConvertParams(unittest.TestCase):
 
             # Check values.
             self.assertTrue(np.all(act_value == exp_value),
-                            msg=('%s values do not match' % name))
+                            msg=('%s values do not match (%d, %d)' % (name, np.sum(act_value != exp_value), act_value.size)))
 
 #-------------------------------------------------------------------------------
 #    def test_opaque_to_canonical(self):
