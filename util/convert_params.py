@@ -122,7 +122,7 @@ def to_canonical(old_format, var_names_to_values):
         return
 
     if old_format == 'basic':
-        split_p = re.compile('bidirectional_rnn/(fw|bw)/basic_lstm_cell/(kernel|bias)(/Adam|/Adam_1)?$')
+        split_p = re.compile('bidirectional_rnn/([fb]w)/basic_lstm_cell/(kernel|bias)(/Adam|/Adam_1)?$')
 
         new_names_to_values = {}
         for name, value in var_names_to_values.items():
@@ -142,7 +142,7 @@ def to_canonical(old_format, var_names_to_values):
         var_names_to_values.clear()
         var_names_to_values.update(new_names_to_values)
     elif old_format == 'cudnn':
-        cudnn_p = re.compile('fp32_storage/cudnn_lstm/opaque_kernel(/Adam(_1)?)?$')
+        cudnn_p = re.compile('fp32_storage/cudnn_lstm/opaque_kernel(/Adam(?:_1)?)?$')
 
         new_names_to_values = {}
         # Remove values that will be converted.
@@ -187,7 +187,7 @@ def from_canonical(new_format, var_names_to_values):
         return
 
     if new_format == 'cudnn':
-        lstm_p = re.compile('(bw|fw)_(b_)?(R|W)(i|c|o|f)(/Adam|/Adam_1)?$')
+        lstm_p = re.compile('(bw|fw)_(b_)?(R|W)([icof])(/Adam|/Adam_1)?$')
 
         new_names_to_values = {}
         # Add values that will not be converted.

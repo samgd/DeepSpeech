@@ -1,9 +1,3 @@
-    # TODO: Modify dicts in place, more efficient?
-    # TODO: More efficient regex?
-    # TODO: DRY test init
-    # TODO: global constant for names
-    # TODO: Ensure matches TF conversion code
-
 import copy
 import numpy as np
 import tensorflow as tf
