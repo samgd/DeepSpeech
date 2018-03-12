@@ -102,7 +102,7 @@ def get_tensors(ckpt):
     var_to_dtype_map = reader.get_variable_to_dtype_map()
 
     var_names_to_values = {}
-    for name in var_to_dtype_map.items():
+    for name in var_to_dtype_map:
         var_names_to_values[name] = reader.get_tensor(name)
     return var_names_to_values
 
