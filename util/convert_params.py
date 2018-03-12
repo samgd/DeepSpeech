@@ -90,13 +90,13 @@ def main(_):
     save_to_ckpt(FLAGS.out_ckpt, var_names_to_values)
 
 def get_tensors(ckpt):
-    '''Return a dict of name->value for all Tensors in the checkpoint.
+    '''Return a dictionary of name: value for all Tensors in the checkpoint.
 
     Args:
-        ckpt: Filename of checkpoint to read Tensor values from.
+        ckpt: Filename of TensorFlow checkpoint to read Tensor values from.
 
     Returns:
-        dict of name->value for Tensor in ckpt.
+        Dictionary of Tensor name: value.
     '''
     reader = tf.train.NewCheckpointReader(ckpt)
     var_to_dtype_map = reader.get_variable_to_dtype_map()
@@ -107,16 +107,12 @@ def get_tensors(ckpt):
     return var_names_to_values
 
 def to_canonical(old_format, var_names_to_values):
-    '''Return an updated dict with the LSTM parameters in the canonical format.
+    '''Convert dictionary contents from one format to 'canonical'.
 
     Args:
+        var_names_to_values: Name: value dictionary.
         old_format: Format of parameter set found in var_names_to_values. Can
             be any of ['basic', 'cudnn', 'canonical'].
-        var_names_to_values: Dict of name->value.
-
-    Returns:
-        Updated name->value dict with the LSTM parameters converted to the
-        canonical format.
     '''
     if old_format == 'canonical':
         return
@@ -132,7 +128,7 @@ def to_canonical(old_format, var_names_to_values):
                 tensors = {name: value}
             elif match.group(2) == 'kernel':
                 tensors = basic_to_canonical_weights(value,
-                                                     prefix=match.group(1) +  '_',
+                                                     prefix=match.group(1) + '_',
                                                      postfix=match.group(3) or '')
             elif match.group(2) == 'bias':
                 tensors = basic_to_canonical_biases(value,
@@ -162,26 +158,22 @@ def to_canonical(old_format, var_names_to_values):
 def update_canonical_forget_bias(forget_bias_add, var_names_to_values):
     '''Add forget_bias_add to the forward and backward forget gate biases.
 
-    Note: Adam values are not changed.
+    Adam values are not changed.
 
     Args:
         forget_bias_add: Value added to forget gate biases.
-        var_names_to_values: Canonical parameter dictonary.
+        var_names_to_values: Name: value dictionary.
     '''
     var_names_to_values['fw_b_Wf'] += forget_bias_add
     var_names_to_values['bw_b_Wf'] += forget_bias_add
 
 def from_canonical(new_format, var_names_to_values):
-    '''Return an updated dict with the LSTM parameters in the given format.
+    '''Convert dictionary contents from 'canonical' to a new format.
 
     Args:
-        new_format: Type of parameter set to convert the LSTM parameters in
+        new_format: Formatt of parameter set to convert the LSTM parameters in
             var_names_to_values to. Can be any of ['basic', 'cudnn', 'canonical'].
-        var_names_to_values: Dict of name->value.
-
-    Returns:
-        Updated name->value dict with the LSTM parameters converted to the
-        new_format format.
+        var_names_to_values: Name: value dictonary.
     '''
     if new_format == 'canonical':
         return
@@ -213,7 +205,12 @@ def from_canonical(new_format, var_names_to_values):
         raise ValueError('unknown new_format %r' % new_format)
 
 def save_to_ckpt(ckpt, var_names_to_values):
-    '''Save to out_ckpt.'''
+    '''Save to dictionary contents to a TensorFlow checkpoint.
+
+    Args:
+        ckpt: Checkpoint path.
+        var_names_to_values: Name: value dictionary.
+    '''
     tf.reset_default_graph()
     for name, value in var_names_to_values.items():
         tf.get_variable(name, shape=value.shape, dtype=value.dtype)
@@ -227,7 +224,14 @@ def save_to_ckpt(ckpt, var_names_to_values):
 #- canonical -> cudnn ----------------------------------------------------------
 
 def canonical_to_cudnn(var_names_to_values, postfix=''):
-    '''
+    '''Convert canonical params to cudnn format and return in a new dictionary.
+
+    Args:
+        var_names_to_values: Name: value dictionary.
+        postfix: String to append to each TensorName in the new dictionary.
+
+    Returns:
+        Name: value dictionary.
     '''
     fwd_weights = canonical_to_cudnn_weights(var_names_to_values,
                                              prefix='fw_',
@@ -250,8 +254,7 @@ def canonical_to_cudnn(var_names_to_values, postfix=''):
 
 def canonical_to_cudnn_weights(var_names_to_values, n_units=2048, n_input=4096,
                                prefix='', postfix=''):
-    '''
-    '''
+    '''Convert canonical weights to cudnn format.'''
     weight_shapes = get_weight_shapes(prefix, n_units, n_input, postfix)
     weights = np.array([])
     for name, _ in weight_shapes:
@@ -260,8 +263,7 @@ def canonical_to_cudnn_weights(var_names_to_values, n_units=2048, n_input=4096,
     return weights
 
 def canonical_to_cudnn_biases(var_names_to_values, prefix='', postfix=''):
-    '''
-    '''
+    '''Convert canonical biases to cudnn format.'''
     bias_names = get_bias_names(prefix, postfix)
     biases = np.array([])
     for name in bias_names:
@@ -272,33 +274,14 @@ def canonical_to_cudnn_biases(var_names_to_values, prefix='', postfix=''):
 #- cudnn -> canonical ----------------------------------------------------------
 
 def cudnn_to_canonical(var_names_to_values, n_units=2048, n_input=4096, postfix=''):
-    '''TODO: Update this docstring
-
-    Return a map of name->ndarray for each parameter in cudnn_params.
+    '''Convert cudnn params to canonical format and return in a new dictionary.
 
     Args:
-        cudnn_params: Single-layer, bidirectional CudnnLSTM parameter blob.
-        n_units: Number of units in CudnnLSTM.
-        n_input: Input size to CudnnLSTM.
+        var_names_to_values: Name: value dictionary.
+        postfix: String to append to each TensorName in the new dictionary.
 
     Returns:
-        Map of name->ndarray for each of the tensors in the cudnn_params blob.
-        The parameter names in the map are:
-
-            ['Wi', 'Ri', 'b_Wi', 'b_Ri'
-             'Wf', 'Rf', 'b_Wf', 'b_Rf'
-             'Wc', 'Rc', 'b_Wc', 'b_Rc'
-             'Wo', 'Ro', 'b_Wo', 'b_Ro']
-
-        which correspond to the LSTM equations given by NVIDIA:
-
-            it = sigm(Wi*x_t + Ri*h_t-1 + b_Wi + b_Ri)
-            ft = sigm(Wf*x_t + Rf*h_t-1 + b_Wf + b_Rf)
-            ot = sigm(Wo*x_t + Ro*h_t-1 + b_Wo + b_Ro)
-            c't = tanh(Wc*x_t + Rc*h_t-1 + b_Wc + b_Rc)
-
-        More info here:
-            http://docs.nvidia.com/deeplearning/sdk/cudnn-developer-guide/index.html#cudnnRNNMode_t
+        Name: value dictionary.
     '''
     kernel_name = 'fp32_storage/cudnn_lstm/opaque_kernel' + postfix
     cudnn_params = var_names_to_values[kernel_name]
@@ -324,15 +307,7 @@ def cudnn_to_canonical(var_names_to_values, n_units=2048, n_input=4096, postfix=
     return param_vals
 
 def cudnn_to_canonical_weights(weights, n_units=2048, n_input=4096, prefix='', postfix=''):
-    '''Return a map of name->ndarray for each weight in weights.
-
-    Args:
-        weights: Single-layer, single-direction weight blob.
-        prefix: Optional prefix to append to weight names.
-
-    Returns:
-        Map of name->ndarray for each weight.
-    '''
+    '''Convert cudnn weights to canonical format.'''
     weight_shapes = get_weight_shapes(prefix, n_units, n_input, postfix)
 
     weight_vals = {}
@@ -346,15 +321,7 @@ def cudnn_to_canonical_weights(weights, n_units=2048, n_input=4096, prefix='', p
     return weight_vals
 
 def cudnn_to_canonical_biases(biases, n_units=2048, prefix='', postfix=''):
-    '''Return a map of name->ndarray for each bias in biases.
-
-    Args:
-        biases: Single-layer, single-direction bias blob.
-        prefix: Optional prefix to append to bias names.
-
-    Returns:
-        Map of name->ndarray for each bias.
-    '''
+    '''Convert cudnn biases to canonical format.'''
     bias_names = get_bias_names(prefix, postfix)
 
     bias_vals = {}
@@ -367,8 +334,7 @@ def cudnn_to_canonical_biases(biases, n_units=2048, prefix='', postfix=''):
 #- basic -> canonical ----------------------------------------------------------
 
 def basic_to_canonical_weights(weights, n_units=2048, n_input=4096, prefix='', postfix=''):
-    '''
-    '''
+    '''Convert basic weights to canonical format.'''
     if weights.shape[0] != 4 * n_units:
         weights = weights.T
     assert weights.shape == (4 * n_units, n_input + n_units)
@@ -387,8 +353,7 @@ def basic_to_canonical_weights(weights, n_units=2048, n_input=4096, prefix='', p
     return params
 
 def basic_to_canonical_biases(biases, n_units=2048, n_input=4096, prefix='', postfix=''):
-    '''
-    '''
+    '''Convert basic biases to canonical format.'''
     B_i, B_c, B_f, B_o = np.split(biases, 4, axis=0)
 
     shape = B_i.shape
@@ -409,8 +374,7 @@ def basic_to_canonical_biases(biases, n_units=2048, n_input=4096, prefix='', pos
 #-------------------------------------------------------------------------------
 
 def get_weight_shapes(prefix, n_units=2048, n_input=4096, postfix=''):
-    '''
-    '''
+    '''Return a list of (name, shape) for each canonical weight Tensor.'''
     weight_shapes = [('Wi', (n_units, n_input)),
                      ('Wf', (n_units, n_input)),
                      ('Wc', (n_units, n_input)),
@@ -423,8 +387,7 @@ def get_weight_shapes(prefix, n_units=2048, n_input=4096, postfix=''):
     return weight_shapes
 
 def get_bias_names(prefix, postfix=''):
-    '''
-    '''
+    '''Return a list of names for each canonical bias Tensor.'''
     bias_names = ['b_Wi', 'b_Wf', 'b_Wc', 'b_Wo',
                   'b_Ri', 'b_Rf', 'b_Rc', 'b_Ro']
     bias_names = [prefix + name + postfix for name in bias_names]
