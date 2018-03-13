@@ -25,7 +25,7 @@ Given an input size of 'n_input' and a hidden size of 'n_unit':
 
 'cudnn' format LSTM parameter names and shapes:
 
-    - 'fp32_storage/cudnn_lstm/opaque_kernel'
+    - 'cudnn_lstm/opaque_kernel'
 
     - Shape: (2 * (4 * (n_input * n_unit) + 4 * (n_unit * n_unit) + 8 * n_unit),)
         - Two directions (forward and backward) where the new pre-activation
@@ -138,7 +138,7 @@ def to_canonical(old_format, var_names_to_values):
         var_names_to_values.clear()
         var_names_to_values.update(new_names_to_values)
     elif old_format == 'cudnn':
-        cudnn_p = re.compile('fp32_storage/cudnn_lstm/opaque_kernel(/Adam(?:_1)?)?$')
+        cudnn_p = re.compile('(?:fp32_storage/)cudnn_lstm/opaque_kernel(/Adam(?:_1)?)?$')
 
         new_names_to_values = {}
         # Remove values that will be converted.
@@ -188,7 +188,7 @@ def from_canonical(new_format, var_names_to_values):
                 continue
             new_names_to_values[name] = value
 
-        kernel_name = 'fp32_storage/cudnn_lstm/opaque_kernel'
+        kernel_name = 'cudnn_lstm/opaque_kernel'
         new_names_to_values[kernel_name] = canonical_to_cudnn(var_names_to_values)
 
         cudnn = canonical_to_cudnn(var_names_to_values, postfix='/Adam')
