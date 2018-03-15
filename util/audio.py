@@ -1,6 +1,7 @@
 from __future__ import absolute_import, print_function
 
-import scipy.io.wavfile as wav
+import numpy as np
+import soundfile as sf
 import sys
 
 try:
@@ -57,12 +58,12 @@ except ImportError:
 
 def audiofile_to_input_vector(audio_filename, numcep, numcontext):
     r"""
-    Given a WAV audio file at ``audio_filename``, calculates ``numcep`` MFCC features
+    Given an audio file at ``audio_filename``, calculates ``numcep`` MFCC features
     at every 0.01s time step with a window length of 0.025s. Appends ``numcontext``
     context frames to the left and right of each time step, and returns this data
     in a numpy array.
     """
     # Load wav files
-    fs, audio = wav.read(audio_filename)
+    audio, fs = sf.read(audio_filename, dtype=np.int16)
 
     return audioToInputVector(audio, fs, numcep, numcontext)

@@ -38,6 +38,7 @@ tf.app.flags.DEFINE_string  ('train_files',      '',          'comma separated l
 tf.app.flags.DEFINE_string  ('dev_files',        '',          'comma separated list of files specifying the dataset used for validation. multiple files will get merged')
 tf.app.flags.DEFINE_string  ('test_files',       '',          'comma separated list of files specifying the dataset used for testing. multiple files will get merged')
 tf.app.flags.DEFINE_boolean ('fulltrace',        False,       'if full trace debug info should be generated during training')
+tf.app.flags.DEFINE_string  ('data_format',      'wav',       'format of data in files - should be "wav" or "flac"')
 
 # Cluster configuration
 # =====================
@@ -1620,23 +1621,37 @@ def train(server=None):
     # It will automagically get incremented by the optimizer.
     global_step = tf.Variable(0, trainable=False, name='global_step')
 
+    csv_filename = 'filename'
+    csv_filesize = 'filesize'
+    if FLAGS.data_format in ['wav', 'flac']:
+        csv_filename = FLAGS.data_format + '_' + csv_filename
+        csv_filesize = FLAGS.data_format + '_' + csv_filesize
+    else:
+        raise ValueError('unknown data format %r' % FLAGS.data_format)
+
     # Reading training set
     train_set = DataSet(FLAGS.train_files.split(','),
                         FLAGS.train_batch_size,
                         limit=FLAGS.limit_train,
-                        next_index=lambda i: COORD.get_next_index('train'))
+                        next_index=lambda i: COORD.get_next_index('train'),
+                        csv_filename=csv_filename,
+                        csv_filesize=csv_filesize)
 
     # Reading validation set
     dev_set = DataSet(FLAGS.dev_files.split(','),
                       FLAGS.dev_batch_size,
                       limit=FLAGS.limit_dev,
-                      next_index=lambda i: COORD.get_next_index('dev'))
+                      next_index=lambda i: COORD.get_next_index('dev'),
+                      csv_filename=csv_filename,
+                      csv_filesize=csv_filesize)
 
     # Reading test set
     test_set = DataSet(FLAGS.test_files.split(','),
                        FLAGS.test_batch_size,
                        limit=FLAGS.limit_test,
-                       next_index=lambda i: COORD.get_next_index('test'))
+                       next_index=lambda i: COORD.get_next_index('test'),
+                       csv_filename=csv_filename,
+                       csv_filesize=csv_filesize)
 
     # Combining all sets to a multi set model feeder
     model_feeder = ModelFeeder(train_set,
