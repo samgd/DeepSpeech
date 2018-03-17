@@ -26,6 +26,7 @@ from util.audio import audiofile_to_input_vector
 from util.feeding import DataSet, ModelFeeder
 from util.gpu import get_available_gpus
 from util.shared_lib import check_cupti
+from util.sparsity import cudnn_pruning
 from util.text import sparse_tensor_value_to_texts, wer, levenshtein, Alphabet, ndarray_to_text
 from xdg import BaseDirectory as xdg
 import numpy as np
@@ -385,32 +386,6 @@ def log_error(message):
 # Graph Creation
 # ==============
 
-def mask_getter(getter, name, shape=None, dtype=tf.float32, trainable=True,
-                *args, **kwargs):
-    r'''
-    Apply a variable that is masked if trainable and FLAG.apply_mask is set.
-
-    The default mask is all zeros - the mask's actual value should be restored
-    from a checkpoint.
-    '''
-    variable = getter(name,
-                      shape=shape,
-                      dtype=dtype,
-                      trainable=trainable,
-                      *args, **kwargs)
-    if not (FLAGS.apply_mask and trainable):
-        return variable
-
-    initializer = tf.zeros_like(variable) if shape is None else tf.zeros_initializer
-    mask = getter(name + '/mask',
-                  dtype=dtype,
-                  shape=shape,
-                  initializer=initializer,
-                  trainable=False,
-                  validate_shape=shape is not None)
-
-    return tf.multiply(variable, mask, name=name + '_masked')
-
 def float32_variable_storage_getter(getter, name, shape=None, dtype=None,
                                     initializer=None, regularizer=None,
                                     trainable=True, *args, **kwargs):
@@ -479,18 +454,24 @@ def BiRNN(batch_x, seq_length, dropout, is_training):
     # 1st layer
     b1 = variable_on_worker_level('b1', [n_hidden_1], tf.random_normal_initializer(stddev=FLAGS.b1_stddev))
     h1 = variable_on_worker_level('h1', [n_input + 2*n_input*n_context, n_hidden_1], tf.contrib.layers.xavier_initializer(uniform=False))
+    if FLAGS.apply_mask:
+        h1 = cudnn_pruning.apply_mask(h1, scope='h1')
     layer_1 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(batch_x, h1), b1)), FLAGS.relu_clip)
     layer_1 = tf.nn.dropout(layer_1, (1.0 - dropout[0]))
 
     # 2nd layer
     b2 = variable_on_worker_level('b2', [n_hidden_2], tf.random_normal_initializer(stddev=FLAGS.b2_stddev))
     h2 = variable_on_worker_level('h2', [n_hidden_1, n_hidden_2], tf.random_normal_initializer(stddev=FLAGS.h2_stddev))
+    if FLAGS.apply_mask:
+        h2 = cudnn_pruning.apply_mask(h2, scope='h2')
     layer_2 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(layer_1, h2), b2)), FLAGS.relu_clip)
     layer_2 = tf.nn.dropout(layer_2, (1.0 - dropout[1]))
 
     # 3rd layer
     b3 = variable_on_worker_level('b3', [n_hidden_3], tf.random_normal_initializer(stddev=FLAGS.b3_stddev))
     h3 = variable_on_worker_level('h3', [n_hidden_2, n_hidden_3], tf.random_normal_initializer(stddev=FLAGS.h3_stddev))
+    if FLAGS.apply_mask:
+        h3 = cudnn_pruning.apply_mask(h3, scope='h3')
     layer_3 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(layer_2, h3), b3)), FLAGS.relu_clip)
     layer_3 = tf.nn.dropout(layer_3, (1.0 - dropout[2]))
 
@@ -508,6 +489,8 @@ def BiRNN(batch_x, seq_length, dropout, is_training):
     # Now we feed `outputs` to the fifth hidden layer with clipped RELU activation and dropout
     b5 = variable_on_worker_level('b5', [n_hidden_5], tf.random_normal_initializer(stddev=FLAGS.b5_stddev))
     h5 = variable_on_worker_level('h5', [(2 * n_cell_dim), n_hidden_5], tf.random_normal_initializer(stddev=FLAGS.h5_stddev))
+    if FLAGS.apply_mask:
+        h5 = cudnn_pruning.apply_mask(h5, scope='h5')
     layer_5 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(outputs, h5), b5)), FLAGS.relu_clip)
     layer_5 = tf.nn.dropout(layer_5, (1.0 - dropout[5]))
 
@@ -565,11 +548,15 @@ def cudnn_lstm(inputs, seq_length, dropout, is_training):
     # Note that there is a dropout parameter, but it is "applied between layers
     # (e.g., a single layer network will have no dropout applied)."
     # http://docs.nvidia.com/deeplearning/sdk/cudnn-developer-guide/index.html#cudnnSetRNNDescriptor
-    lstm = tf.contrib.cudnn_rnn.CudnnLSTM(num_layers=1,
-                                          num_units=n_cell_dim,
-                                          direction='bidirectional',
-                                          seed=FLAGS.random_seed,
-                                          dtype=precision)
+    cudnn_lstm = tf.contrib.cudnn_rnn.CudnnLSTM
+    if FLAGS.apply_mask:
+        cudnn_lstm = cudnn_pruning.MaskedCudnnLSTM
+
+    lstm = cudnn_lstm(num_layers=1,
+                      num_units=n_cell_dim,
+                      direction='bidirectional',
+                      seed=FLAGS.random_seed,
+                      dtype=precision)
     lstm.build(inputs.get_shape())
     lstm._trainable_weights = [v for v in tf.global_variables() if v.name == 'fp32_storage/cudnn_lstm/opaque_kernel:0']
     collection = tf.get_collection_ref(tf.GraphKeys.SAVEABLE_OBJECTS)
@@ -669,15 +656,14 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     batch_x, batch_seq_len, batch_y = model_feeder.next_batch(tower)
 
     # Calculate the logits of the batch using BiRNN
-    with tf.variable_scope(tf.get_variable_scope(), custom_getter=mask_getter):
-        if precision != tf.float32:
-            with tf.variable_scope('fp32_storage',
-                                   dtype=precision,
-                                   custom_getter=float32_variable_storage_getter):
-                logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
-            logits = tf.cast(logits, tf.float32)
-        else:
+    if precision != tf.float32:
+        with tf.variable_scope('fp32_storage',
+                               dtype=precision,
+                               custom_getter=float32_variable_storage_getter):
             logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
+        logits = tf.cast(logits, tf.float32)
+    else:
+        logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
 
     # Compute the CTC loss using either TensorFlow's `ctc_loss` or Baidu's `warp_ctc_loss`.
     if FLAGS.use_warpctc:
@@ -1668,6 +1654,12 @@ def train(server=None):
     # Add summaries of all variables and gradients to log
     log_grads_and_vars(avg_tower_gradients)
 
+    # Model pruning.
+    pruning_hparams = cudnn_pruning.get_pruning_hparams()
+    p = cudnn_pruning.CudnnPruning(pruning_hparams, global_step=global_step)
+    mask_update_op = p.conditional_mask_update_op()
+    p.add_pruning_summaries()
+
     # Op to merge all summaries for the summary hook
     merge_all_summaries_op = tf.summary.merge_all()
 
@@ -1809,7 +1801,7 @@ def train(server=None):
 
                         log_debug('Starting batch...')
                         # Compute the batch
-                        _, current_step, batch_loss, batch_report = session.run([train_op, global_step, loss, report_params], **extra_params)
+                        _, current_step, batch_loss, batch_report, _ = session.run([train_op, global_step, loss, report_params, mask_update_op], **extra_params)
 
                         # Uncomment the next line for debugging race conditions / distributed TF
                         log_debug('Finished batch step %d.' % current_step)
