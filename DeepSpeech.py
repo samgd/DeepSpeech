@@ -1666,7 +1666,8 @@ def train(server=None):
     train_set = DataSet(FLAGS.train_files.split(','),
                         FLAGS.train_batch_size,
                         limit=FLAGS.limit_train,
-                        next_index=lambda i: COORD.get_next_index('train'))
+                        next_index=lambda i: COORD.get_next_index('train'),
+                        shuffle_batch_order=True)
 
     # Reading validation set
     dev_set = DataSet(FLAGS.dev_files.split(','),

@@ -5,7 +5,7 @@ import tensorflow as tf
 
 from math import ceil
 from six.moves import range
-from threading import Thread
+from threading import Thread, Lock
 from util.audio import audiofile_to_input_vector
 from util.gpu import get_available_gpus
 from util.text import ctc_label_dense_to_sparse, text_to_char_array
@@ -112,23 +112,25 @@ class DataSet(object):
         all_indices = list(range(len(self.files)))
         self.batch_indices = [all_indices[i*batch_size:(i + 1)*batch_size]
                               for i in range(self.total_batches)]
+        self.current_batch = -1
+        self.n_batch = 0
         self.shuffle_batch_order = shuffle_batch_order
         self.shuffle_seed = shuffle_seed
-        self.current_batch = -1
+        self._lock = Lock()
 
     def next_batch_indices(self):
-        idx = self.next_index(self.current_batch)
+        with self._lock:
+            idx = self.next_index(self.current_batch)
 
-        if idx >= self.total_batches:
-            return []
-
-        next_batch = self.batch_indices[idx]
-        self.current_batch = idx
-
-        if self.current_batch == 0 and self.shuffle_batch_order:
-            random.seed(self.shuffle_seed)
-            self.shuffle_seed += 1
-            random.shuffle(self.batch_indices)
+            if idx >= self.total_batches:
+                if self.n_batch % self.total_batches == 0 and self.shuffle_batch_order:
+                    random.seed(self.shuffle_seed)
+                    self.shuffle_seed += 3
+                    random.shuffle(self.batch_indices)
+                return []
+            self.n_batch += 1
+            next_batch = self.batch_indices[idx]
+            self.current_batch = idx
 
         return next_batch
 
