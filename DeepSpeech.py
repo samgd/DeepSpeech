@@ -670,7 +670,10 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     batch_x, batch_seq_len, batch_y = model_feeder.next_batch(tower)
 
     if FLAGS.log_level == 0:
-        batch_seq_len = tf.Print(batch_seq_len, [batch_seq_len], message='D Batch Sequence Length: ')
+        batch_seq_len = tf.Print(batch_seq_len,
+                                 [batch_seq_len],
+                                 message='D Batch Sequence Length: ',
+                                 summarize=512)
 
     # Calculate the logits of the batch using BiRNN
     with tf.variable_scope(tf.get_variable_scope(), custom_getter=mask_getter):
@@ -1451,6 +1454,10 @@ class TrainingCoordinator(object):
         if self._test and not self._train:
             # We shall test, and are not in train mode anymore
             self._test = False
+
+            # Clear queues and start queue feeding threads.
+            self._reset_counters()
+
             self._epochs_running.append(Epoch(self._epoch, self._num_jobs_test, set_name='test', report=True))
             # Indicating that there were 'new' epoch(s) provided
             result = True
