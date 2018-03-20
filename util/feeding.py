@@ -1,9 +1,11 @@
+import numpy as np
 import pandas
+import random
 import tensorflow as tf
 
-from threading import Thread
 from math import ceil
 from six.moves import range
+from threading import Thread
 from util.audio import audiofile_to_input_vector
 from util.gpu import get_available_gpus
 from util.text import ctc_label_dense_to_sparse, text_to_char_array
@@ -24,7 +26,7 @@ class ModelFeeder(object):
                  numcontext,
                  alphabet,
                  tower_feeder_count=-1,
-                 threads_per_queue=2,
+                 threads_per_queue=1,
                  dtype=tf.float32):
 
         self.train = train_set
@@ -36,10 +38,10 @@ class ModelFeeder(object):
         self.tower_feeder_count = max(len(get_available_gpus()), 1) if tower_feeder_count < 0 else tower_feeder_count
         self.threads_per_queue = threads_per_queue
 
-        self.ph_x = tf.placeholder(dtype, [None, numcep + (2 * numcep * numcontext)])
-        self.ph_x_length = tf.placeholder(tf.int32, [])
-        self.ph_y = tf.placeholder(tf.int32, [None,])
-        self.ph_y_length = tf.placeholder(tf.int32, [])
+        self.ph_x = tf.placeholder(dtype, [None, None, numcep + (2 * numcep * numcontext)])
+        self.ph_x_length = tf.placeholder(tf.int32, [None,])
+        self.ph_y = tf.placeholder(tf.int32, [None,None,])
+        self.ph_y_length = tf.placeholder(tf.int32, [None,])
         self.ph_batch_size = tf.placeholder(tf.int32, [])
         self.ph_queue_selector = tf.placeholder(tf.int32, name='Queue_Selector')
 
@@ -53,6 +55,10 @@ class ModelFeeder(object):
         for tower_feeder in self._tower_feeders:
             queue_threads += tower_feeder.start_queue_threads(session, coord)
         return queue_threads
+
+    def empty_queues(self, session):
+        for tower_feeder in self._tower_feeders:
+            tower_feeder.empty_queues(session)
 
     def close_queues(self, session):
         '''
@@ -82,9 +88,11 @@ class DataSet(object):
     '''
     Represents a collection of audio samples and their respective transcriptions.
     Takes a set of CSV files produced by importers in /bin.
+
+    next_index: Function to compute index of next batch. Note that the result
+    is taken modulo the total number of batches.
     '''
-    def __init__(self, csvs, batch_size, skip=0, limit=0, ascending=True, next_index=lambda i: i + 1,
-                 csv_filename='wav_filename', csv_filesize='wav_filesize'):
+    def __init__(self, csvs, batch_size, skip=0, limit=0, ascending=True, next_index=lambda i: i + 1, shuffle_batch_order=False, shuffle_seed=1234):
         self.batch_size = batch_size
         self.next_index = next_index
         self.files = None
@@ -94,12 +102,36 @@ class DataSet(object):
                 self.files = file
             else:
                 self.files = self.files.append(file)
-        self.files = self.files.sort_values(by=csv_filesize, ascending=ascending) \
-                         .ix[:, [csv_filename, "transcript"]] \
+        self.files = self.files.sort_values(by="wav_filesize", ascending=ascending) \
+                         .ix[:, ["wav_filename", "transcript"]] \
                          .values[skip:]
         if limit > 0:
             self.files = self.files[:limit]
         self.total_batches = int(ceil(len(self.files) / batch_size))
+
+        all_indices = list(range(len(self.files)))
+        self.batch_indices = [all_indices[i*batch_size:(i + 1)*batch_size]
+                              for i in range(self.total_batches)]
+        self.shuffle_batch_order = shuffle_batch_order
+        self.shuffle_seed = shuffle_seed
+        self.current_batch = -1
+
+    def next_batch_indices(self):
+        idx = self.next_index(self.current_batch)
+
+        if idx >= self.total_batches:
+            return []
+
+        next_batch = self.batch_indices[idx]
+        self.current_batch = idx
+
+        if self.current_batch == 0 and self.shuffle_batch_order:
+            random.seed(self.shuffle_seed)
+            self.shuffle_seed += 1
+            random.shuffle(self.batch_indices)
+
+        return next_batch
+
 
 class _DataSetLoader(object):
     '''
@@ -111,11 +143,13 @@ class _DataSetLoader(object):
     def __init__(self, model_feeder, data_set, alphabet, dtype=tf.float32):
         self._model_feeder = model_feeder
         self._data_set = data_set
-        self.queue = tf.PaddingFIFOQueue(shapes=[[None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [], [None,], []],
-                                                  dtypes=[dtype, tf.int32, tf.int32, tf.int32],
-                                                  capacity=data_set.batch_size * 2)
+        self.queue = tf.PaddingFIFOQueue(shapes=[[None, None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [None,], [None,None,], [None,]],
+                                         dtypes=[dtype, tf.int32, tf.int32, tf.int32],
+                                         capacity=data_set.batch_size * 2)
         self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_y_length])
         self._close_op = self.queue.close(cancel_pending_enqueues=True)
+        self._size_op = self.queue.size()
+        self._empty_op = self.queue.dequeue_many(self._size_op)
         self._alphabet = alphabet
 
     def start_queue_threads(self, session, coord):
@@ -130,6 +164,9 @@ class _DataSetLoader(object):
             queue_thread.start()
         return queue_threads
 
+    def empty_queue(self, session):
+        session.run(self._empty_op)
+
     def close_queue(self, session):
         '''
         Closes the data set queue.
@@ -140,24 +177,60 @@ class _DataSetLoader(object):
         '''
         Queue thread routine.
         '''
-        file_count = len(self._data_set.files)
-        index = -1
+        run_options = tf.RunOptions(timeout_in_ms=1000)
+
         while not coord.should_stop():
-            index = self._data_set.next_index(index) % file_count
-            wav_file, transcript = self._data_set.files[index]
-            source = audiofile_to_input_vector(wav_file, self._model_feeder.numcep, self._model_feeder.numcontext)
-            source_len = len(source)
-            target = text_to_char_array(transcript, self._alphabet)
-            target_len = len(target)
-            if source_len < target_len:
-                raise ValueError('Error: Audio file {} is too short for transcription.'.format(wav_file))
-            try:
-                session.run(self._enqueue_op, feed_dict={ self._model_feeder.ph_x: source,
-                                                          self._model_feeder.ph_x_length: source_len,
-                                                          self._model_feeder.ph_y: target,
-                                                          self._model_feeder.ph_y_length: target_len })
-            except tf.errors.CancelledError:
+            batch_x, batch_x_len = [], []
+            batch_y, batch_y_len = [], []
+            max_x, max_y = (0, 0)   # Used to pad each source before concat.
+
+            for index in self._data_set.next_batch_indices():
+                wav_file, transcript = self._data_set.files[index]
+                source = audiofile_to_input_vector(wav_file, self._model_feeder.numcep, self._model_feeder.numcontext)
+                source_len = len(source)
+                target = text_to_char_array(transcript, self._alphabet)
+                target_len = len(target)
+                if source_len < target_len:
+                    raise ValueError('Error: Audio file {} is too short for transcription.'.format(wav_file))
+
+                batch_x.append(source)
+                batch_x_len.append(source_len)
+                batch_y.append(target)
+                batch_y_len.append(target_len)
+
+                max_x = max(max_x, source_len)
+                max_y = max(max_y, target_len)
+
+            if not batch_x:
                 return
+
+            # Pad to max len and concat.
+            padded_batch_x, padded_batch_y = [], []
+            for x in batch_x:
+                pad_x = max_x - len(x)
+                if pad_x > 0:
+                    x = np.pad(x, ((0, pad_x), (0, 0)), mode='constant')
+                padded_batch_x.append(x)
+            for y in batch_y:
+                pad_y = max_y - len(y)
+                if pad_y > 0:
+                    y = np.pad(y, (0, pad_y), mode='constant')
+                padded_batch_y.append(y)
+
+            queued = False
+            while not queued and not coord.should_stop():
+                try:
+                    session.run(self._enqueue_op,
+                                feed_dict={ self._model_feeder.ph_x: np.stack(padded_batch_x),
+                                            self._model_feeder.ph_x_length: batch_x_len,
+                                            self._model_feeder.ph_y: np.stack(padded_batch_y),
+                                            self._model_feeder.ph_y_length: batch_y_len },
+                                options=run_options)
+                    queued = True
+                except tf.errors.DeadlineExceededError:
+                    pass
+                except tf.errors.CancelledError:
+                        return
 
 class _TowerFeeder(object):
     '''
@@ -177,8 +250,8 @@ class _TowerFeeder(object):
         '''
         Draw the next batch from from the combined switchable queue.
         '''
-        source, source_lengths, target, target_lengths = self._queue.dequeue_many(self._model_feeder.ph_batch_size)
-        sparse_labels = ctc_label_dense_to_sparse(target, target_lengths, self._model_feeder.ph_batch_size)
+        source, source_lengths, target, target_lengths = self._queue.dequeue()
+        sparse_labels = ctc_label_dense_to_sparse(target, target_lengths)
         return source, source_lengths, sparse_labels
 
     def start_queue_threads(self, session, coord):
@@ -190,10 +263,13 @@ class _TowerFeeder(object):
             queue_threads += set_queue.start_queue_threads(session, coord)
         return queue_threads
 
+    def empty_queues(self, session):
+        for set_queue in self._loaders:
+            set_queue.empty_queue(session)
+
     def close_queues(self, session):
         '''
         Closes queues of all owned _DataSetLoader instances.
         '''
         for set_queue in self._loaders:
             set_queue.close_queue(session)
-

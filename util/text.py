@@ -138,7 +138,7 @@ def levenshtein(a,b):
     return current[n]
 
 # gather_nd is taken from https://github.com/tensorflow/tensorflow/issues/206#issuecomment-229678962
-# 
+#
 # Unfortunately we can't just use tf.gather_nd because it does not have gradients
 # implemented yet, so we need this workaround.
 #
@@ -156,7 +156,7 @@ def gather_nd(params, indices, shape):
 # but sparse data and queues don't mix well, so we store padded tensors in the
 # queue and convert to a sparse representation after dequeuing a batch.
 #
-def ctc_label_dense_to_sparse(labels, label_lengths, batch_size):
+def ctc_label_dense_to_sparse(labels, label_lengths):
     # The second dimension of labels must be equal to the longest label length in the batch
     correct_shape_assert = tf.assert_equal(tf.shape(labels)[1], tf.reduce_max(label_lengths))
     with tf.control_dependencies([correct_shape_assert]):
@@ -181,6 +181,7 @@ def ctc_label_dense_to_sparse(labels, label_lengths, batch_size):
     batch_ind = tf.boolean_mask(batch_array, dense_mask)
 
     indices = tf.transpose(tf.reshape(tf.concat([batch_ind, label_ind], 0), [2, -1]))
+    batch_size = labels.shape[0]
     shape = [batch_size, tf.reduce_max(label_lengths)]
     vals_sparse = gather_nd(labels, indices, shape)
 

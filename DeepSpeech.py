@@ -669,6 +669,9 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     # Obtain the next batch of data
     batch_x, batch_seq_len, batch_y = model_feeder.next_batch(tower)
 
+    if FLAGS.log_level == 0:
+        batch_seq_len = tf.Print(batch_seq_len, [batch_seq_len], message='D Batch Sequence Length: ')
+
     # Calculate the logits of the batch using BiRNN
     with tf.variable_scope(tf.get_variable_scope(), custom_getter=mask_getter):
         if precision != tf.float32:
@@ -1283,6 +1286,10 @@ class TrainingCoordinator(object):
         Instantiated on all workers, calls of non-chief workers will transparently
         HTTP-forwarded to the chief worker instance.
         '''
+        self._coord = None
+        self._model_feeder = None
+        self._session = None
+        self._feeder_threads = []
         self._init()
         self._lock = Lock()
         self.started = False
@@ -1290,9 +1297,19 @@ class TrainingCoordinator(object):
             self._httpd = BaseHTTPServer.HTTPServer((FLAGS.coord_host, FLAGS.coord_port), TrainingCoordinator.TrainingCoordinationHandler)
 
     def _reset_counters(self):
+        if all([self._coord, self._model_feeder, self._session]):
+            self._coord.request_stop()
+            while any([t.is_alive() for t in self._feeder_threads]):
+                time.sleep(0.1)
+            self._coord.clear_stop()
+
         self._index_train = 0
         self._index_dev = 0
         self._index_test = 0
+
+        if all([self._coord, self._model_feeder, self._session]):
+            self._model_feeder.empty_queues(self._session)
+            self._feeder_threads = self._model_feeder.start_queue_threads(self._session, self._coord)
 
     def _init(self):
         self._epochs_running = []
@@ -1306,7 +1323,7 @@ class TrainingCoordinator(object):
         for epoch in self._epochs_running:
             log_debug('       - running: ' + epoch.job_status())
 
-    def start_coordination(self, model_feeder, step=0):
+    def start_coordination(self, model_feeder, coord, session, step=0):
         '''Starts to coordinate epochs and jobs among workers on base of
         data-set sizes, the (global) step and FLAGS parameters.
 
@@ -1318,6 +1335,9 @@ class TrainingCoordinator(object):
         '''
         with self._lock:
             self._init()
+            self._model_feeder = model_feeder
+            self._coord = coord
+            self._session = session
 
             # Number of GPUs per worker - fixed for now by local reality or cluster setup
             gpus_per_worker = len(available_devices)
@@ -1633,25 +1653,19 @@ def train(server=None):
     train_set = DataSet(FLAGS.train_files.split(','),
                         FLAGS.train_batch_size,
                         limit=FLAGS.limit_train,
-                        next_index=lambda i: COORD.get_next_index('train'),
-                        csv_filename=csv_filename,
-                        csv_filesize=csv_filesize)
+                        next_index=lambda i: COORD.get_next_index('train'))
 
     # Reading validation set
     dev_set = DataSet(FLAGS.dev_files.split(','),
                       FLAGS.dev_batch_size,
                       limit=FLAGS.limit_dev,
-                      next_index=lambda i: COORD.get_next_index('dev'),
-                      csv_filename=csv_filename,
-                      csv_filesize=csv_filesize)
+                      next_index=lambda i: COORD.get_next_index('dev'))
 
     # Reading test set
     test_set = DataSet(FLAGS.test_files.split(','),
                        FLAGS.test_batch_size,
                        limit=FLAGS.limit_test,
-                       next_index=lambda i: COORD.get_next_index('test'),
-                       csv_filename=csv_filename,
-                       csv_filesize=csv_filesize)
+                       next_index=lambda i: COORD.get_next_index('test'))
 
     # Combining all sets to a multi set model feeder
     model_feeder = ModelFeeder(train_set,
@@ -1698,11 +1712,6 @@ def train(server=None):
         Embedded coordination hook-class that will use variables of the
         surrounding Python context.
         '''
-        def after_create_session(self, session, coord):
-            log_debug('Starting queue runners...')
-            model_feeder.start_queue_threads(session, coord)
-            log_debug('Queue runners started.')
-
         def end(self, session):
             # Closing the data_set queues
             log_debug('Closing queues...')
@@ -1779,10 +1788,9 @@ def train(server=None):
             try:
                 if is_chief:
                     # Retrieving global_step from the (potentially restored) model
-                    feed_dict = {is_training: False}
-                    model_feeder.set_data_set(feed_dict, model_feeder.train)
-                    step = session.run(global_step, feed_dict=feed_dict)
-                    COORD.start_coordination(model_feeder, step)
+                    step = get_session(session).run(global_step)
+                    coord = tf.train.Coordinator()
+                    COORD.start_coordination(model_feeder, coord, get_session(session), step)
 
                 # Get the first job
                 job = COORD.get_job()
