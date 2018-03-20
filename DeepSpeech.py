@@ -6,7 +6,7 @@ import os
 import sys
 
 log_level_index = sys.argv.index('--log_level') + 1 if '--log_level' in sys.argv else 0
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = sys.argv[log_level_index] if log_level_index > 0 and log_level_index < len(sys.argv) else '3'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'#sys.argv[log_level_index] if log_level_index > 0 and log_level_index < len(sys.argv) else '3'
 
 import datetime
 import pickle
@@ -1300,24 +1300,30 @@ class TrainingCoordinator(object):
             self._httpd = BaseHTTPServer.HTTPServer((FLAGS.coord_host, FLAGS.coord_port), TrainingCoordinator.TrainingCoordinationHandler)
 
     def _reset_counters(self):
+        log_debug('Resetting counters...')
         if all([self._coord, self._model_feeder, self._session]):
+            log_debug('Stopping queue threads...')
             self._coord.request_stop()
             while any([t.is_alive() for t in self._feeder_threads]):
                 time.sleep(0.1)
             self._coord.clear_stop()
+            log_debug('Queue threads stopped.')
 
         self._index_train = 0
         self._index_dev = 0
         self._index_test = 0
 
         if all([self._coord, self._model_feeder, self._session]):
+            log_debug('Emptying queues...')
             self._model_feeder.empty_queues(self._session)
+            log_debug('Queues emptied.')
+            log_debug('Starting queue threads...')
             self._feeder_threads = self._model_feeder.start_queue_threads(self._session, self._coord)
+            log_debug('Threads started.')
 
     def _init(self):
         self._epochs_running = []
         self._epochs_done = []
-        self._reset_counters()
         self._dev_losses = []
 
     def _log_all_jobs(self):

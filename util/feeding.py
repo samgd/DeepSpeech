@@ -26,7 +26,7 @@ class ModelFeeder(object):
                  numcontext,
                  alphabet,
                  tower_feeder_count=-1,
-                 threads_per_queue=1,
+                 threads_per_queue=2,
                  dtype=tf.float32):
 
         self.train = train_set
@@ -107,7 +107,7 @@ class DataSet(object):
                          .values[skip:]
         if limit > 0:
             self.files = self.files[:limit]
-        self.total_batches = int(ceil(len(self.files) / batch_size))
+        self.total_batches = int(ceil(float(len(self.files)) / batch_size))
 
         all_indices = list(range(len(self.files)))
         self.batch_indices = [all_indices[i*batch_size:(i + 1)*batch_size]
