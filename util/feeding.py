@@ -6,7 +6,7 @@ import tensorflow as tf
 from math import ceil
 from six.moves import range
 from threading import Thread, Lock
-from util.audio import audiofile_to_input_vector
+from util.npy_audio import audiofile_to_input_vector
 from util.gpu import get_available_gpus
 from util.text import ctc_label_dense_to_sparse, text_to_char_array
 

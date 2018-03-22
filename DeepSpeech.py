@@ -22,7 +22,7 @@ from tensorflow.contrib.cudnn_rnn.ops import gen_cudnn_rnn_ops
 from tensorflow.contrib.session_bundle import exporter
 from tensorflow.python.tools import freeze_graph
 from threading import Thread, Lock
-from util.audio import audiofile_to_input_vector
+from util.npy_read import audiofile_to_input_vector
 from util.feeding import DataSet, ModelFeeder
 from util.gpu import get_available_gpus
 from util.shared_lib import check_cupti
