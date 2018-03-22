@@ -222,13 +222,16 @@ class _DataSetLoader(object):
                     y = np.pad(y, (0, pad_y), mode='constant')
                 padded_batch_y.append(y)
 
+            stack_x = np.stack(padded_batch_x)
+            stack_y = np.stack(padded_batch_y)
+
             queued = False
             while not queued and not coord.should_stop():
                 try:
                     session.run(self._enqueue_op,
-                                feed_dict={ self._model_feeder.ph_x: np.stack(padded_batch_x),
+                                feed_dict={ self._model_feeder.ph_x: stack_x,
                                             self._model_feeder.ph_x_length: batch_x_len,
-                                            self._model_feeder.ph_y: np.stack(padded_batch_y),
+                                            self._model_feeder.ph_y: stack_y,
                                             self._model_feeder.ph_y_length: batch_y_len },
                                 options=run_options)
                     queued = True
