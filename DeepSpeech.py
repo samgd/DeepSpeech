@@ -22,7 +22,7 @@ from tensorflow.contrib.cudnn_rnn.ops import gen_cudnn_rnn_ops
 from tensorflow.contrib.session_bundle import exporter
 from tensorflow.python.tools import freeze_graph
 from threading import Thread, Lock
-from util.npy_read import audiofile_to_input_vector
+from util.npy_audio import audiofile_to_input_vector
 from util.feeding import DataSet, ModelFeeder
 from util.gpu import get_available_gpus
 from util.shared_lib import check_cupti
@@ -1663,20 +1663,23 @@ def train(server=None):
         raise ValueError('unknown data format %r' % FLAGS.data_format)
 
     # Reading training set
-    train_set = DataSet(FLAGS.train_files.split(','),
+    train_set = DataSet('train',
+                        FLAGS.train_files.split(','),
                         FLAGS.train_batch_size,
                         limit=FLAGS.limit_train,
                         next_index=lambda i: COORD.get_next_index('train'),
                         shuffle_batch_order=True)
 
     # Reading validation set
-    dev_set = DataSet(FLAGS.dev_files.split(','),
+    dev_set = DataSet('dev',
+                      FLAGS.dev_files.split(','),
                       FLAGS.dev_batch_size,
                       limit=FLAGS.limit_dev,
                       next_index=lambda i: COORD.get_next_index('dev'))
 
     # Reading test set
-    test_set = DataSet(FLAGS.test_files.split(','),
+    test_set = DataSet('test',
+                       FLAGS.test_files.split(','),
                        FLAGS.test_batch_size,
                        limit=FLAGS.limit_test,
                        next_index=lambda i: COORD.get_next_index('test'))

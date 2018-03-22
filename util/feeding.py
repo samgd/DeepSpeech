@@ -92,7 +92,8 @@ class DataSet(object):
     next_index: Function to compute index of next batch. Note that the result
     is taken modulo the total number of batches.
     '''
-    def __init__(self, csvs, batch_size, skip=0, limit=0, ascending=True, next_index=lambda i: i + 1, shuffle_batch_order=False, shuffle_seed=1234):
+    def __init__(self, name, csvs, batch_size, skip=0, limit=0, ascending=True, next_index=lambda i: i + 1, shuffle_batch_order=False, shuffle_seed=1234):
+        self.name = name
         self.batch_size = batch_size
         self.next_index = next_index
         self.files = None
@@ -145,12 +146,14 @@ class _DataSetLoader(object):
     def __init__(self, model_feeder, data_set, alphabet, dtype=tf.float32):
         self._model_feeder = model_feeder
         self._data_set = data_set
+        max_queued_batches = 30
         self.queue = tf.PaddingFIFOQueue(shapes=[[None, None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [None,], [None,None,], [None,]],
                                          dtypes=[dtype, tf.int32, tf.int32, tf.int32],
-                                         capacity=data_set.batch_size * 2)
+                                         capacity=max_queued_batches)
         self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_y_length])
         self._close_op = self.queue.close(cancel_pending_enqueues=True)
         self._size_op = self.queue.size()
+        tf.summary.scalar('%s queue size' % data_set.name, self._size_op)
         self._empty_op = self.queue.dequeue_many(self._size_op)
         self._alphabet = alphabet
 
@@ -179,7 +182,7 @@ class _DataSetLoader(object):
         '''
         Queue thread routine.
         '''
-        run_options = tf.RunOptions(timeout_in_ms=1000)
+        run_options = tf.RunOptions(timeout_in_ms=10000)
 
         while not coord.should_stop():
             batch_x, batch_x_len = [], []
@@ -232,7 +235,7 @@ class _DataSetLoader(object):
                 except tf.errors.DeadlineExceededError:
                     pass
                 except tf.errors.CancelledError:
-                        return
+                    return
 
 class _TowerFeeder(object):
     '''
