@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import pandas
 import random
 import tensorflow as tf
@@ -27,7 +28,8 @@ class ModelFeeder(object):
                  alphabet,
                  tower_feeder_count=-1,
                  threads_per_queue=2,
-                 dtype=tf.float32):
+                 dtype=tf.float32,
+                 logdir=''):
 
         self.train = train_set
         self.dev = dev_set
@@ -45,7 +47,7 @@ class ModelFeeder(object):
         self.ph_batch_size = tf.placeholder(tf.int32, [])
         self.ph_queue_selector = tf.placeholder(tf.int32, name='Queue_Selector')
 
-        self._tower_feeders = [_TowerFeeder(self, i, alphabet, dtype) for i in range(self.tower_feeder_count)]
+        self._tower_feeders = [_TowerFeeder(self, i, alphabet, dtype, logdir) for i in range(self.tower_feeder_count)]
 
     def start_queue_threads(self, session, coord):
         '''
@@ -143,7 +145,7 @@ class _DataSetLoader(object):
     Keeps a ModelFeeder reference for accessing shared settings and placeholders.
     Keeps a DataSet reference to access its samples.
     '''
-    def __init__(self, model_feeder, data_set, alphabet, dtype=tf.float32):
+    def __init__(self, model_feeder, data_set, alphabet, dtype=tf.float32, logdir=''):
         self._model_feeder = model_feeder
         self._data_set = data_set
         max_queued_batches = 30
@@ -153,7 +155,12 @@ class _DataSetLoader(object):
         self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_y_length])
         self._close_op = self.queue.close(cancel_pending_enqueues=True)
         self._size_op = self.queue.size()
-        tf.summary.scalar('%s queue size' % data_set.name, self._size_op)
+        self._size_summary = tf.summary.scalar('%s queue size' % data_set.name,
+                                               tensor=self._size_op,
+                                               collections=[])
+        self._file_writer = tf.summary.FileWriter(os.path.join(logdir, data_set.name),
+                                                  max_queue=100,
+                                                  flush_secs=120)
         self._empty_op = self.queue.dequeue_many(self._size_op)
         self._alphabet = alphabet
 
@@ -177,6 +184,7 @@ class _DataSetLoader(object):
         Closes the data set queue.
         '''
         session.run(self._close_op)
+        self._file_writer.close()
 
     def _populate_batch_queue(self, session, coord):
         '''
@@ -228,12 +236,13 @@ class _DataSetLoader(object):
             queued = False
             while not queued and not coord.should_stop():
                 try:
-                    session.run(self._enqueue_op,
-                                feed_dict={ self._model_feeder.ph_x: stack_x,
-                                            self._model_feeder.ph_x_length: batch_x_len,
-                                            self._model_feeder.ph_y: stack_y,
-                                            self._model_feeder.ph_y_length: batch_y_len },
-                                options=run_options)
+                    summary_str, _ = session.run([self._size_summary, self._enqueue_op],
+                                                 feed_dict={ self._model_feeder.ph_x: stack_x,
+                                                             self._model_feeder.ph_x_length: batch_x_len,
+                                                             self._model_feeder.ph_y: stack_y,
+                                                             self._model_feeder.ph_y_length: batch_y_len },
+                                                 options=run_options)
+                    self._file_writer.add_summary(summary_str)
                     queued = True
                 except tf.errors.DeadlineExceededError:
                     pass
@@ -246,10 +255,10 @@ class _TowerFeeder(object):
     It creates, owns and combines three _DataSetLoader instances.
     Keeps a ModelFeeder reference for accessing shared settings and placeholders.
     '''
-    def __init__(self, model_feeder, index, alphabet, dtype=tf.float32):
+    def __init__(self, model_feeder, index, alphabet, dtype=tf.float32, logdir=''):
         self._model_feeder = model_feeder
         self.index = index
-        self._loaders = [_DataSetLoader(model_feeder, data_set, alphabet, dtype) for data_set in model_feeder.sets]
+        self._loaders = [_DataSetLoader(model_feeder, data_set, alphabet, dtype, logdir) for data_set in model_feeder.sets]
         self._queues = [set_queue.queue for set_queue in self._loaders]
         self._queue = tf.QueueBase.from_list(model_feeder.ph_queue_selector, self._queues)
         self._close_op = self._queue.close(cancel_pending_enqueues=True)

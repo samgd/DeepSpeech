@@ -1692,7 +1692,8 @@ def train(server=None):
                                n_context,
                                alphabet,
                                tower_feeder_count=len(available_devices),
-                               dtype=precision)
+                               dtype=precision,
+                               logdir=FLAGS.summary_dir)
 
     # Create the optimizer
     optimizer = create_optimizer()
