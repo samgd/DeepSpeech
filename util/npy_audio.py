@@ -26,6 +26,7 @@ def audiofile_to_input_vector(audio_filename, numcep, numcontext):
 
     # Flatten the second and third dimensions
     train_inputs = np.reshape(train_inputs, [num_strides, -1])
+    train_inputs = train_inputs[:-2*numcontext, :]
 
     # Return results
     return train_inputs
