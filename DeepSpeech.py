@@ -77,16 +77,15 @@ tf.app.flags.DEFINE_integer ('loss_scale',       1,           'loss scaling valu
 
 # Adam optimizer (http://arxiv.org/abs/1412.6980) parameters
 
-tf.app.flags.DEFINE_float   ('beta1',            0.9,         'beta 1 parameter of Adam optimizer')
-tf.app.flags.DEFINE_float   ('beta2',            0.999,       'beta 2 parameter of Adam optimizer')
-tf.app.flags.DEFINE_float   ('epsilon',          1e-8,        'epsilon parameter of Adam optimizer')
-tf.app.flags.DEFINE_float   ('learning_rate',    0.001,       'learning rate of Adam optimizer')
+tf.app.flags.DEFINE_float   ('beta1',                   0.9,         'beta 1 parameter of Adam optimizer')
+tf.app.flags.DEFINE_float   ('beta2',                   0.999,       'beta 2 parameter of Adam optimizer')
+tf.app.flags.DEFINE_float   ('epsilon',                 1e-8,        'epsilon parameter of Adam optimizer')
+tf.app.flags.DEFINE_float   ('target_learning_rate',    0.001,       'learning rate of Adam optimizer')
 
 # Batch sizes
 
-tf.app.flags.DEFINE_integer ('train_batch_size', 1,           'number of elements in a training batch')
-tf.app.flags.DEFINE_integer ('dev_batch_size',   1,           'number of elements in a validation batch')
-tf.app.flags.DEFINE_integer ('test_batch_size',  1,           'number of elements in a test batch')
+tf.app.flags.DEFINE_integer ('target_batch_size', 1,          'number of elements in a training batch')
+tf.app.flags.DEFINE_integer ('max_seq_len',       925,        'maximum sequence length to achieve target batch size')
 
 # Sample limits
 
@@ -692,8 +691,8 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     else:
         total_loss = tf.nn.ctc_loss(labels=batch_y, inputs=logits, sequence_length=batch_seq_len)
 
-    # Calculate the average loss across the batch
-    avg_loss = tf.reduce_mean(total_loss)
+    # Calculate the summed loss across the batch
+    sum_loss = tf.reduce_sum(total_loss)
 
     # Beam search decode the batch
     decoded, _ = decode_with_lm(logits, batch_seq_len, merge_repeated=False, beam_width=FLAGS.beam_width)
@@ -711,7 +710,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     # - the recognition mean edit distance,
     # - the decoded batch and
     # - the original batch_y (which contains the verified transcriptions).
-    return total_loss, avg_loss, distance, mean_edit_distance, decoded, batch_y
+    return total_loss, sum_loss, distance, mean_edit_distance, decoded, batch_y
 
 
 # Adam Optimization
@@ -724,7 +723,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
 # we will use the Adam method for optimization (http://arxiv.org/abs/1412.6980),
 # because, generally, it requires less fine-tuning.
 def create_optimizer():
-    optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.learning_rate,
+    optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.target_learning_rate,
                                        beta1=FLAGS.beta1,
                                        beta2=FLAGS.beta2,
                                        epsilon=FLAGS.epsilon)
@@ -786,8 +785,8 @@ def get_tower_results(model_feeder, optimizer, is_training):
     # To calculate the mean of the mean edit distances
     tower_mean_edit_distances = []
 
-    # To calculate the mean of the losses
-    tower_avg_losses = []
+    # To calculate the sum of the losses
+    tower_sum_losses = []
 
     with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
         # Loop over available_devices
@@ -800,9 +799,9 @@ def get_tower_results(model_feeder, optimizer, is_training):
             with tf.device(device):
                 # Create a scope for all operations of tower i
                 with tf.name_scope('tower_%d' % i) as scope:
-                    # Calculate the avg_loss and mean_edit_distance and retrieve the decoded
+                    # Calculate the sum_loss and mean_edit_distance and retrieve the decoded
                     # batch along with the original batch's labels (Y) of this tower
-                    total_loss, avg_loss, distance, mean_edit_distance, decoded, labels = \
+                    total_loss, sum_loss, distance, mean_edit_distance, decoded, labels = \
                         calculate_mean_edit_distance_and_loss(model_feeder, i, no_dropout if optimizer is None else dropout_rates, is_training)
 
                     # Allow for variables to be re-used by the next tower
@@ -822,21 +821,21 @@ def get_tower_results(model_feeder, optimizer, is_training):
 
                     # Compute gradients for model parameters using tower's mini-batch
                     # Apply loss-scaling to improve numerical stability
-                    gradients = optimizer.compute_gradients(FLAGS.loss_scale * avg_loss)
+                    gradients = optimizer.compute_gradients(FLAGS.loss_scale * sum_loss)
                     # Retain tower's gradients
                     tower_gradients.append(gradients)
 
                     # Retain tower's mean edit distance
                     tower_mean_edit_distances.append(mean_edit_distance)
 
-                    # Retain tower's avg losses
-                    tower_avg_losses.append(avg_loss)
+                    # Retain tower's summed losses
+                    tower_sum_losses.append(sum_loss)
 
     # Return the results tuple, the gradients, and the means of mean edit distances and losses
     return (tower_labels, tower_decodings, tower_distances, tower_total_losses), \
            tower_gradients, \
            tf.reduce_mean(tower_mean_edit_distances, 0), \
-           tf.reduce_mean(tower_avg_losses, 0)
+           tf.reduce_mean(tower_sum_losses, 0)
 
 
 def average_gradients(tower_gradients):
@@ -1664,20 +1663,23 @@ def train(server=None):
 
     # Reading training set
     train_set = DataSet(FLAGS.train_files.split(','),
-                        FLAGS.train_batch_size,
+                        FLAGS.target_batch_size,
+                        FLAGS.max_seq_len,
                         limit=FLAGS.limit_train,
                         next_index=lambda i: COORD.get_next_index('train'),
                         shuffle_batch_order=True)
 
     # Reading validation set
     dev_set = DataSet(FLAGS.dev_files.split(','),
-                      FLAGS.dev_batch_size,
+                      FLAGS.target_batch_size,
+                      FLAGS.max_seq_len,
                       limit=FLAGS.limit_dev,
                       next_index=lambda i: COORD.get_next_index('dev'))
 
     # Reading test set
     test_set = DataSet(FLAGS.test_files.split(','),
-                       FLAGS.test_batch_size,
+                       FLAGS.target_batch_size,
+                       FLAGS.max_seq_len,
                        limit=FLAGS.limit_test,
                        next_index=lambda i: COORD.get_next_index('test'))
 

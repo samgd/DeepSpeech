@@ -76,7 +76,6 @@ class ModelFeeder(object):
         index = self.sets.index(data_set)
         assert index >= 0
         feed_dict[self.ph_queue_selector] = index
-        feed_dict[self.ph_batch_size] = data_set.batch_size
 
     def next_batch(self, tower_feeder_index):
         '''
@@ -92,8 +91,13 @@ class DataSet(object):
     next_index: Function to compute index of next batch. Note that the result
     is taken modulo the total number of batches.
     '''
-    def __init__(self, csvs, batch_size, skip=0, limit=0, ascending=True, next_index=lambda i: i + 1, shuffle_batch_order=False, shuffle_seed=1234):
-        self.batch_size = batch_size
+    def __init__(self, csvs, target_batch_size, max_seq_len, skip=0, limit=0,
+                 ascending=True, next_index=lambda i: i + 1,
+                 shuffle_batch_order=False, shuffle_seed=1234):
+
+        self.target_batch_size = target_batch_size
+        self.max_seq_len = max_seq_len
+
         self.next_index = next_index
         self.files = None
         for csv in csvs:
@@ -103,27 +107,53 @@ class DataSet(object):
             else:
                 self.files = self.files.append(file)
         self.files = self.files.sort_values(by="wav_filesize", ascending=ascending) \
-                         .ix[:, ["wav_filename", "transcript"]] \
+                         .ix[:, ["wav_filename", "transcript", "seq_len"]] \
                          .values[skip:]
         if limit > 0:
             self.files = self.files[:limit]
-        self.total_batches = int(ceil(float(len(self.files)) / batch_size))
 
-        all_indices = list(range(len(self.files)))
-        self.batch_indices = [all_indices[i*batch_size:(i + 1)*batch_size]
-                              for i in range(self.total_batches)]
+        self.batch_indices = self._create_batch_indices()
+        print(self.batch_indices)
+        self.total_batches = len(self.batch_indices)
+
         self.current_batch = -1
         self.n_batch = 0
         self.shuffle_batch_order = shuffle_batch_order
         self.shuffle_seed = shuffle_seed
         self._lock = Lock()
 
+    def _create_batch_indices(self):
+        '''Return a list of groups (lists) of batch indices into self.files.
+
+        The sum of the sequence lengths in each batch is guaranteed to be less
+        than or equal to target_batch_size * max_seq_len.
+        '''
+        batch_indices = []
+
+        max_batch_values = self.target_batch_size * self.max_seq_len
+        current_batch = []
+        current_batch_len = 0
+        for i, row in enumerate(self.files):
+            if current_batch_len + row[2] > max_batch_values:
+                batch_indices.append(current_batch)
+                current_batch = []
+                current_batch_len = 0
+
+            current_batch.append(i)
+            current_batch_len += row[2]
+        if current_batch:
+            batch_indices.append(current_batch)
+
+        return batch_indices
+
     def next_batch_indices(self):
         with self._lock:
             idx = self.next_index(self.current_batch)
 
             if idx >= self.total_batches:
-                if self.n_batch % self.total_batches == 0 and self.shuffle_batch_order:
+                if (not self.total_batches or
+                        (self.n_batch % self.total_batches == 0
+                         and self.shuffle_batch_order)):
                     random.seed(self.shuffle_seed)
                     self.shuffle_seed += 3
                     random.shuffle(self.batch_indices)
@@ -147,7 +177,7 @@ class _DataSetLoader(object):
         self._data_set = data_set
         self.queue = tf.PaddingFIFOQueue(shapes=[[None, None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [None,], [None,None,], [None,]],
                                          dtypes=[dtype, tf.int32, tf.int32, tf.int32],
-                                         capacity=data_set.batch_size * 2)
+                                         capacity=10)
         self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_y_length])
         self._close_op = self.queue.close(cancel_pending_enqueues=True)
         self._size_op = self.queue.size()
@@ -187,7 +217,7 @@ class _DataSetLoader(object):
             max_x, max_y = (0, 0)   # Used to pad each source before concat.
 
             for index in self._data_set.next_batch_indices():
-                wav_file, transcript = self._data_set.files[index]
+                wav_file, transcript, _ = self._data_set.files[index]
                 source = audiofile_to_input_vector(wav_file, self._model_feeder.numcep, self._model_feeder.numcontext)
                 source_len = len(source)
                 target = text_to_char_array(transcript, self._alphabet)
