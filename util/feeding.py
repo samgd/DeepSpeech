@@ -94,7 +94,7 @@ class DataSet(object):
     is taken modulo the total number of batches.
     '''
     def __init__(self, name, csvs, target_batch_size, max_seq_len, skip=0, limit=0,
-                 ascending=True, next_index=lambda i: i + 1,
+                 ascending=False, next_index=lambda i: i + 1,
                  shuffle_batch_order=False, shuffle_seed=1234):
 
         self.name = name
@@ -116,7 +116,6 @@ class DataSet(object):
             self.files = self.files[:limit]
 
         self.batch_indices = self._create_batch_indices()
-        print(self.batch_indices)
         self.total_batches = len(self.batch_indices)
 
         self.current_batch = -1
@@ -125,24 +124,33 @@ class DataSet(object):
         self.shuffle_seed = shuffle_seed
         self._lock = Lock()
 
-    def _create_batch_indices(self):
+    def _create_batch_indices(self, multiple_of=8):
         '''Return a list of groups (lists) of batch indices into self.files.
 
         The sum of the sequence lengths in each batch is guaranteed to be less
         than or equal to target_batch_size * max_seq_len.
+
+        Args:
+            multiple_of: Each batch will be a multiple_of this number, except
+                if there are too few elements.
         '''
         batch_indices = []
 
         max_batch_values = self.target_batch_size * self.max_seq_len
         current_batch = []
+        current_batch_lens = []
         current_batch_len = 0
         for i, row in enumerate(self.files):
             if current_batch_len + row[2] > max_batch_values:
-                batch_indices.append(current_batch)
-                current_batch = []
-                current_batch_len = 0
+                # Ensure batch is a multiple of the desired number
+                split = (len(current_batch) // multiple_of) * multiple_of
+                batch_indices.append(current_batch[:split])
+                current_batch = current_batch[split:]
+                current_batch_lens = current_batch_lens[split:]
+                current_batch_len = sum(current_batch_lens)
 
             current_batch.append(i)
+            current_batch_lens.append(row[2])
             current_batch_len += row[2]
         if current_batch:
             batch_indices.append(current_batch)

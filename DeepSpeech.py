@@ -672,7 +672,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
         batch_seq_len = tf.Print(batch_seq_len,
                                  [batch_seq_len],
                                  message='D Batch Sequence Length: ',
-                                 summarize=512)
+                                 summarize=4096)
 
     # Calculate the logits of the batch using BiRNN
     with tf.variable_scope(tf.get_variable_scope(), custom_getter=mask_getter):
