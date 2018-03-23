@@ -667,7 +667,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     the decoded result and the batch's original Y.
     '''
     # Obtain the next batch of data
-    batch_x, batch_seq_len, batch_y = model_feeder.next_batch(tower)
+    batch_x, batch_seq_len, batch_y, labels, labels_len = model_feeder.next_batch(tower)
 
     if FLAGS.log_level == 0:
         batch_seq_len = tf.Print(batch_seq_len,
@@ -688,7 +688,14 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
 
     # Compute the CTC loss using either TensorFlow's `ctc_loss` or Baidu's `warp_ctc_loss`.
     if FLAGS.use_warpctc:
-        total_loss = tf.contrib.warpctc.warp_ctc_loss(labels=batch_y, inputs=logits, sequence_length=batch_seq_len)
+        import warpctc_tensorflow
+        total_loss = warpctc_tensorflow.ctc(activations=logits,
+                                            flat_labels=tf.to_int32(tf.reshape(labels, (-1,))),
+                                            label_lengths=tf.to_int32(labels_len),
+                                            input_lengths=tf.to_int32(batch_seq_len),
+                                            blank_label=alphabet.size() - 1)
+                                            
+        #total_loss = tf.contrib.warpctc.warp_ctc_loss(labels=batch_y, inputs=logits, sequence_length=batch_seq_len)
     else:
         total_loss = tf.nn.ctc_loss(labels=batch_y, inputs=logits, sequence_length=batch_seq_len)
 
@@ -892,14 +899,15 @@ def log_variable(variable, gradient=None):
     tf.summary.scalar(name='%s/sttdev' % name, tensor=tf.sqrt(tf.reduce_mean(tf.square(variable - mean))))
     tf.summary.scalar(name='%s/max'    % name, tensor=tf.reduce_max(variable))
     tf.summary.scalar(name='%s/min'    % name, tensor=tf.reduce_min(variable))
-    tf.summary.histogram(name=name, values=variable)
+    #tf.summary.histogram(name=name, values=variable)
     if gradient is not None:
         if isinstance(gradient, tf.IndexedSlices):
             grad_values = gradient.values
         else:
             grad_values = gradient
         if grad_values is not None:
-            tf.summary.histogram(name='%s/gradients' % name, values=grad_values)
+            pass
+            #tf.summary.histogram(name='%s/gradients' % name, values=grad_values)
 
 
 def log_grads_and_vars(grads_and_vars):
@@ -1781,9 +1789,17 @@ def train(server=None):
             session = session._sess
         return session
 
-    # The MonitoredTrainingSession takes care of session initialization,
-    # restoring from a checkpoint, saving to a checkpoint, and closing when done
-    # or an error occurs.
+    builder = tf.profiler.ProfileOptionBuilder
+    opts = builder(builder.time_and_memory()).order_by('micros').build()
+    # Create a profiling context, set constructor argument `trace_steps`,
+    # `dump_steps` to empty for explicit control.
+#    with tf.contrib.tfprof.ProfileContext('/tmp/train_dir',
+#                                          trace_steps=[],
+#                                          dump_steps=[]) as pctx:
+
+        # The MonitoredTrainingSession takes care of session initialization,
+        # restoring from a checkpoint, saving to a checkpoint, and closing when done
+        # or an error occurs.
     try:
         with tf.train.MonitoredTrainingSession(master='' if server is None else server.target,
                                                is_chief=is_chief,
@@ -1791,6 +1807,7 @@ def train(server=None):
                                                checkpoint_dir=FLAGS.checkpoint_dir,
                                                save_checkpoint_secs=FLAGS.checkpoint_secs if FLAGS.train else None,
                                                config=session_config) as session:
+
             if len(FLAGS.initialize_from_frozen_model) > 0:
                 log_info('Initializing from frozen model: {}'.format(FLAGS.initialize_from_frozen_model))
                 feed_dict = {is_training: False}
@@ -1845,12 +1862,15 @@ def train(server=None):
 
                     # Loop over the batches
                     for job_step in range(job.steps):
+                        #pctx.trace_next_step()
+                        #pctx.dump_next_step()
                         if session.should_stop():
                             break
 
-                        log_debug('Starting batch...')
+                        #log_debug('Starting batch...')
                         # Compute the batch
                         _, current_step, batch_loss, batch_report = session.run([train_op, global_step, loss, report_params], **extra_params)
+                        #pctx.profiler.profile_operations(options=opts)
 
                         # Uncomment the next line for debugging race conditions / distributed TF
                         log_debug('Finished batch step %d.' % current_step)
@@ -1858,11 +1878,11 @@ def train(server=None):
                         # Add batch to loss
                         total_loss += batch_loss
 
-                        if job.report and FLAGS.report_wer:
-                            # Collect individual sample results
-                            collect_results(report_results, batch_report[0])
-                            # Add batch to total_mean_edit_distance
-                            total_mean_edit_distance += batch_report[1]
+                        #if job.report and FLAGS.report_wer:
+                        #    # Collect individual sample results
+                        #    collect_results(report_results, batch_report[0])
+                        #    # Add batch to total_mean_edit_distance
+                        #    total_mean_edit_distance += batch_report[1]
 
                     # Gathering job results
                     job.loss = total_loss / job.steps

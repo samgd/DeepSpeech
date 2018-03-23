@@ -94,7 +94,7 @@ class DataSet(object):
     next_index: Function to compute index of next batch. Note that the result
     is taken modulo the total number of batches.
     '''
-    def __init__(self, name, csvs, batch_size, skip=0, limit=0, ascending=True, next_index=lambda i: i + 1, shuffle_batch_order=False, shuffle_seed=1234):
+    def __init__(self, name, csvs, batch_size, skip=0, limit=0, ascending=False, next_index=lambda i: i + 1, shuffle_batch_order=False, shuffle_seed=1234):
         self.name = name
         self.batch_size = batch_size
         self.next_index = next_index
@@ -148,7 +148,7 @@ class _DataSetLoader(object):
     def __init__(self, model_feeder, data_set, alphabet, dtype=tf.float32, logdir=''):
         self._model_feeder = model_feeder
         self._data_set = data_set
-        max_queued_batches = 30
+        max_queued_batches = 10
         self.queue = tf.PaddingFIFOQueue(shapes=[[None, None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [None,], [None,None,], [None,]],
                                          dtypes=[dtype, tf.int32, tf.int32, tf.int32],
                                          capacity=max_queued_batches)
@@ -199,6 +199,7 @@ class _DataSetLoader(object):
 
             for index in self._data_set.next_batch_indices():
                 wav_file, transcript = self._data_set.files[index]
+                print(wav_file, transcript)
                 source = audiofile_to_input_vector(wav_file, self._model_feeder.numcep, self._model_feeder.numcontext)
                 source_len = len(source)
                 target = text_to_char_array(transcript, self._alphabet)
@@ -269,7 +270,7 @@ class _TowerFeeder(object):
         '''
         source, source_lengths, target, target_lengths = self._queue.dequeue()
         sparse_labels = ctc_label_dense_to_sparse(target, target_lengths)
-        return source, source_lengths, sparse_labels
+        return source, source_lengths, sparse_labels, target, target_lengths#sparse_labels, t
 
     def start_queue_threads(self, session, coord):
         '''

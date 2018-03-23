@@ -27,10 +27,5 @@ def audiofile_to_input_vector(audio_filename, numcep, numcontext):
     # Flatten the second and third dimensions
     train_inputs = np.reshape(train_inputs, [num_strides, -1])
 
-    # Whiten inputs (TODO: Should we whiten?)
-    # Copy the strided array so that we can write to it safely
-    train_inputs = np.copy(train_inputs)
-    train_inputs = (train_inputs - np.mean(train_inputs))/np.std(train_inputs)
-
     # Return results
     return train_inputs
