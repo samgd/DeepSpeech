@@ -925,11 +925,13 @@ def calculate_report(results_tuple):
     total_levenshtein = 0.0
     total_label_length = 0.0
     for label, decoding, distance, loss in items:
-        sample_wer = wer(label, decoding)
-        sample = Sample(label, decoding, loss, distance, sample_wer)
+        sample_leven = levenshtein(label.split(), decoding.split())
+        lab_len = float(len(label.split()))
+        sample_wer = float(sample_leven) / lab_len
+        sample = Sample(label, decoding, loss, distance, sample_wer, sample_leven, lab_len)
         samples.append(sample)
-        total_levenshtein += levenshtein(label.split(), decoding.split())
-        total_label_length += float(len(label.split()))
+        total_levenshtein += sample_leven
+        total_label_length += lab_len
 
     # Getting the WER from the accumulated levenshteins and lengths
     samples_wer = total_levenshtein / total_label_length
@@ -1033,7 +1035,7 @@ def new_id():
     return id_counter
 
 class Sample(object):
-    def __init__(self, src, res, loss, mean_edit_distance, sample_wer):
+    def __init__(self, src, res, loss, mean_edit_distance, sample_wer, levenhstein, label_length):
         '''Represents one item of a WER report.
 
         Args:
@@ -1047,6 +1049,8 @@ class Sample(object):
         self.loss = loss
         self.mean_edit_distance = mean_edit_distance
         self.wer = sample_wer
+        self.levenhstein = levenhstein
+        self.label_length = label_length
 
     def __str__(self):
         return 'WER: %f, loss: %f, mean edit distance: %f\n - src: "%s"\n - res: "%s"' % (self.wer, self.loss, self.mean_edit_distance, self.src, self.res)
@@ -1186,8 +1190,14 @@ class Epoch(object):
                 if (FLAGS.early_stop is True) and (self.set_name == 'dev'):
                     COORD._dev_losses.append(self.loss)
 
+                total_leven = 0.0
+                total_lab_len = 0.0
+                for sample in self.samples:
+                    total_leven += sample.levenhstein
+                    total_lab_len += sample.label_length
+
                 if self.report and FLAGS.report_wer:
-                    self.wer = agg_wer / num_jobs
+                    self.wer = total_leven / total_lab_len
                     self.mean_edit_distance = agg_mean_edit_distance / num_jobs
 
                     # Order samles by their loss (lowest loss on top)
@@ -1904,7 +1914,6 @@ def train(server=None):
                     if job.report and FLAGS.report_wer:
                         job.mean_edit_distance = total_mean_edit_distance / job.steps
                         job.wer, job.samples = calculate_report(report_results)
-
 
                     # Send the current job to coordinator and receive the next one
                     log_debug('Sending %s...' % job)
