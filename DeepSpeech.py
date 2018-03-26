@@ -26,6 +26,7 @@ from util.npy_audio import audiofile_to_input_vector
 from util.feeding import DataSet, ModelFeeder
 from util.gpu import get_available_gpus
 from util.shared_lib import check_cupti
+from util.sparsity import cudnn_pruning
 from util.text import sparse_tensor_value_to_texts, wer, levenshtein, Alphabet, ndarray_to_text
 from xdg import BaseDirectory as xdg
 import numpy as np
@@ -93,6 +94,13 @@ tf.app.flags.DEFINE_integer ('limit_train',      0,           'maximum number of
 tf.app.flags.DEFINE_integer ('limit_dev',        0,           'maximum number of elements to use from validation set- 0 means no limit')
 tf.app.flags.DEFINE_integer ('limit_test',       0,           'maximum number of elements to use from test set- 0 means no limit')
 
+# Sparsity
+
+tf.app.flags.DEFINE_integer ('begin_pruning_epoch',   0,        'the epoch at which to begin pruning')
+tf.app.flags.DEFINE_integer ('end_pruning_epoch',     0,        'the epoch at which to terminate pruning - 0 means use epoch')
+tf.app.flags.DEFINE_integer ('pruning_frequency',     50,       'steps per mask update')
+tf.app.flags.DEFINE_float   ('target_sparsity',       0.9,      'target sparsity value')
+
 # Step widths
 
 tf.app.flags.DEFINE_integer ('display_step',     0,           'number of epochs we cycle through before displaying detailed progress - 0 means no progress display')
@@ -120,10 +128,10 @@ tf.app.flags.DEFINE_boolean ('report_wer',       True,        'compute and repor
 tf.app.flags.DEFINE_string  ('wer_log_pattern',  '',          'pattern for machine readable global logging of WER progress; has to contain %%s, %%s and %%f for the set name, the date and the float respectively; example: "GLOBAL LOG: logwer(\'12ade231\', %%s, %%s, %%f)" would result in some entry like "GLOBAL LOG: logwer(\'12ade231\', \'train\', \'2017-05-18T03:09:48-0700\', 0.05)"; if omitted (default), there will be no logging')
 
 tf.app.flags.DEFINE_boolean ('log_placement',    False,       'whether to log device placement of the operators to the console')
-tf.app.flags.DEFINE_integer ('report_count',     10,          'number of phrases with lowest WER (best matching) to print out during a WER report')
+tf.app.flags.DEFINE_integer ('report_count',     50,          'number of phrases with lowest WER (best matching) to print out during a WER report')
 
 tf.app.flags.DEFINE_string  ('summary_dir',      '',          'target directory for TensorBoard summaries - defaults to directory "deepspeech/summaries" within user\'s data home specified by the XDG Base Directory Specification')
-tf.app.flags.DEFINE_integer ('summary_secs',     0,           'interval in seconds for saving TensorBoard summaries - if 0, no summaries will be written')
+tf.app.flags.DEFINE_integer ('summary_steps',    0,           'interval in steps for saving TensorBoard summaries - if 0, no summaries will be written')
 
 # Geometry
 
@@ -385,32 +393,6 @@ def log_error(message):
 # Graph Creation
 # ==============
 
-def mask_getter(getter, name, shape=None, dtype=tf.float32, trainable=True,
-                *args, **kwargs):
-    r'''
-    Apply a variable that is masked if trainable and FLAG.apply_mask is set.
-
-    The default mask is all zeros - the mask's actual value should be restored
-    from a checkpoint.
-    '''
-    variable = getter(name,
-                      shape=shape,
-                      dtype=dtype,
-                      trainable=trainable,
-                      *args, **kwargs)
-    if not (FLAGS.apply_mask and trainable):
-        return variable
-
-    initializer = tf.zeros_like(variable) if shape is None else tf.zeros_initializer
-    mask = getter(name + '/mask',
-                  dtype=dtype,
-                  shape=shape,
-                  initializer=initializer,
-                  trainable=False,
-                  validate_shape=shape is not None)
-
-    return tf.multiply(variable, mask, name=name + '_masked')
-
 def float32_variable_storage_getter(getter, name, shape=None, dtype=None,
                                     initializer=None, regularizer=None,
                                     trainable=True, *args, **kwargs):
@@ -479,18 +461,24 @@ def BiRNN(batch_x, seq_length, dropout, is_training):
     # 1st layer
     b1 = variable_on_worker_level('b1', [n_hidden_1], tf.random_normal_initializer(stddev=FLAGS.b1_stddev))
     h1 = variable_on_worker_level('h1', [n_input + 2*n_input*n_context, n_hidden_1], tf.contrib.layers.xavier_initializer(uniform=False))
+    if FLAGS.apply_mask:
+        h1 = cudnn_pruning.apply_mask(h1, scope='h1')
     layer_1 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(batch_x, h1), b1)), FLAGS.relu_clip)
     layer_1 = tf.nn.dropout(layer_1, (1.0 - dropout[0]))
 
     # 2nd layer
     b2 = variable_on_worker_level('b2', [n_hidden_2], tf.random_normal_initializer(stddev=FLAGS.b2_stddev))
     h2 = variable_on_worker_level('h2', [n_hidden_1, n_hidden_2], tf.random_normal_initializer(stddev=FLAGS.h2_stddev))
+    if FLAGS.apply_mask:
+        h2 = cudnn_pruning.apply_mask(h2, scope='h2')
     layer_2 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(layer_1, h2), b2)), FLAGS.relu_clip)
     layer_2 = tf.nn.dropout(layer_2, (1.0 - dropout[1]))
 
     # 3rd layer
     b3 = variable_on_worker_level('b3', [n_hidden_3], tf.random_normal_initializer(stddev=FLAGS.b3_stddev))
     h3 = variable_on_worker_level('h3', [n_hidden_2, n_hidden_3], tf.random_normal_initializer(stddev=FLAGS.h3_stddev))
+    if FLAGS.apply_mask:
+        h3 = cudnn_pruning.apply_mask(h3, scope='h3')
     layer_3 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(layer_2, h3), b3)), FLAGS.relu_clip)
     layer_3 = tf.nn.dropout(layer_3, (1.0 - dropout[2]))
 
@@ -508,6 +496,8 @@ def BiRNN(batch_x, seq_length, dropout, is_training):
     # Now we feed `outputs` to the fifth hidden layer with clipped RELU activation and dropout
     b5 = variable_on_worker_level('b5', [n_hidden_5], tf.random_normal_initializer(stddev=FLAGS.b5_stddev))
     h5 = variable_on_worker_level('h5', [(2 * n_cell_dim), n_hidden_5], tf.random_normal_initializer(stddev=FLAGS.h5_stddev))
+    if FLAGS.apply_mask:
+        h5 = cudnn_pruning.apply_mask(h5, scope='h5')
     layer_5 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(outputs, h5), b5)), FLAGS.relu_clip)
     layer_5 = tf.nn.dropout(layer_5, (1.0 - dropout[5]))
 
@@ -565,11 +555,15 @@ def cudnn_lstm(inputs, seq_length, dropout, is_training):
     # Note that there is a dropout parameter, but it is "applied between layers
     # (e.g., a single layer network will have no dropout applied)."
     # http://docs.nvidia.com/deeplearning/sdk/cudnn-developer-guide/index.html#cudnnSetRNNDescriptor
-    lstm = tf.contrib.cudnn_rnn.CudnnLSTM(num_layers=1,
-                                          num_units=n_cell_dim,
-                                          direction='bidirectional',
-                                          seed=FLAGS.random_seed,
-                                          dtype=precision)
+    cudnn_lstm = tf.contrib.cudnn_rnn.CudnnLSTM
+    if FLAGS.apply_mask:
+        cudnn_lstm = cudnn_pruning.MaskedCudnnLSTM
+
+    lstm = cudnn_lstm(num_layers=1,
+                      num_units=n_cell_dim,
+                      direction='bidirectional',
+                      seed=FLAGS.random_seed,
+                      dtype=precision)
     lstm.build(inputs.get_shape())
     lstm._trainable_weights = [v for v in tf.global_variables() if v.name == 'fp32_storage/cudnn_lstm/opaque_kernel:0']
     collection = tf.get_collection_ref(tf.GraphKeys.SAVEABLE_OBJECTS)
@@ -675,15 +669,14 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
                                  summarize=4096)
 
     # Calculate the logits of the batch using BiRNN
-    with tf.variable_scope(tf.get_variable_scope(), custom_getter=mask_getter):
-        if precision != tf.float32:
-            with tf.variable_scope('fp32_storage',
-                                   dtype=precision,
-                                   custom_getter=float32_variable_storage_getter):
-                logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
-            logits = tf.cast(logits, tf.float32)
-        else:
+    if precision != tf.float32:
+        with tf.variable_scope('fp32_storage',
+                               dtype=precision,
+                               custom_getter=float32_variable_storage_getter):
             logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
+        logits = tf.cast(logits, tf.float32)
+    else:
+        logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
 
     # Compute the CTC loss using either TensorFlow's `ctc_loss` or Baidu's `warp_ctc_loss`.
     if FLAGS.use_warpctc:
@@ -1719,6 +1712,23 @@ def train(server=None):
     # Add summaries of all variables and gradients to log
     log_grads_and_vars(avg_tower_gradients)
 
+    # Model pruning.
+    pruning_hparams = cudnn_pruning.get_pruning_hparams()
+    pruning_hparams.begin_pruning_step = FLAGS.begin_pruning_epoch * model_feeder.train.total_batches
+    pruning_hparams.sparsity_function_begin_step = pruning_hparams.begin_pruning_step
+ 
+    pruning_hparams.end_pruning_step = FLAGS.end_pruning_epoch * model_feeder.train.total_batches
+    if pruning_hparams.end_pruning_step == 0:
+        pruning_hparams.end_pruning_step = FLAGS.epoch * model_feeder.train.total_batches
+    pruning_hparams.sparsity_function_end_step = pruning_hparams.end_pruning_step
+
+    pruning_hparams.pruning_frequency = FLAGS.pruning_frequency
+    pruning_hparams.target_sparsity = FLAGS.target_sparsity
+
+    p = cudnn_pruning.CudnnPruning(pruning_hparams, global_step=global_step)
+    mask_update_op = p.conditional_mask_update_op()
+    p.add_pruning_summaries()
+
     # Op to merge all summaries for the summary hook
     merge_all_summaries_op = tf.summary.merge_all()
 
@@ -1751,8 +1761,8 @@ def train(server=None):
         hooks.append(optimizer.make_session_run_hook(is_chief))
 
     # Hook to save TensorBoard summaries
-    if FLAGS.summary_secs > 0:
-        hooks.append(tf.train.SummarySaverHook(save_secs=FLAGS.summary_secs, output_dir=FLAGS.summary_dir, summary_op=merge_all_summaries_op))
+    if FLAGS.summary_steps > 0:
+        hooks.append(tf.train.SummarySaverHook(save_steps=FLAGS.summary_steps, output_dir=FLAGS.summary_dir, summary_op=merge_all_summaries_op))
 
     # Hook to save checkpoint after each epoch
     saver = tf.train.Saver(max_to_keep=FLAGS.max_to_keep)
@@ -1865,11 +1875,11 @@ def train(server=None):
 
                         log_debug('Starting batch...')
                         # Compute the batch
-                        _, current_step, batch_loss, batch_report = session.run([train_op, global_step, loss, report_params], **extra_params)
+                        _, current_step, batch_loss, batch_report, _ = session.run([train_op, global_step, loss, report_params, mask_update_op], **extra_params)
                         #pctx.profiler.profile_operations(options=opts)
 
                         # Uncomment the next line for debugging race conditions / distributed TF
-                        log_debug('Finished batch step %d.' % current_step)
+                        log_debug('Finished %s batch step %d - loss: %f.' % (job.set_name, current_step, batch_loss))
 
                         # Add batch to loss
                         total_loss += batch_loss
