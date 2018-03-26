@@ -74,11 +74,12 @@ import tensorflow as tf
 
 from tensorflow.contrib.framework import assign_from_values
 
-tf.app.flags.DEFINE_string ('in_ckpt',         '',      'checkpoint to read Tensor values from')
-tf.app.flags.DEFINE_string ('out_ckpt',        '',      'checkpoint to write Tensor values to')
-tf.app.flags.DEFINE_string ('in_format',       'basic', '')
-tf.app.flags.DEFINE_string ('out_format',      'cudnn', '')
-tf.app.flags.DEFINE_float  ('forget_bias_add', 0.0,     'value to add to forget gate Tensor - Adam Tensor values are not changed')
+tf.app.flags.DEFINE_string ('in_ckpt',           '',      'checkpoint to read Tensor values from')
+tf.app.flags.DEFINE_string ('out_ckpt',          '',      'checkpoint to write Tensor values to')
+tf.app.flags.DEFINE_string ('in_format',         'basic', '')
+tf.app.flags.DEFINE_string ('out_format',        'cudnn', '')
+tf.app.flags.DEFINE_float  ('forget_bias_add',   0.0,     'value to add to forget gate Tensor - Adam Tensor values are not changed')
+tf.app.flags.DEFINE_boolean('reset_global_step', True,    'reset global step to 0')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -86,6 +87,7 @@ def main(_):
     var_names_to_values = get_tensors(FLAGS.in_ckpt)
     to_canonical(FLAGS.in_format, var_names_to_values)
     update_canonical_forget_bias(FLAGS.forget_bias_add, var_names_to_values)
+    reset_global_step(var_names_to_values)
     from_canonical(FLAGS.out_format, var_names_to_values)
     save_to_ckpt(FLAGS.out_ckpt, var_names_to_values)
 
@@ -166,6 +168,14 @@ def update_canonical_forget_bias(forget_bias_add, var_names_to_values):
     '''
     var_names_to_values['fw_b_Wf'] += forget_bias_add
     var_names_to_values['bw_b_Wf'] += forget_bias_add
+
+def reset_global_step(var_names_to_values):
+    '''Set the global step value to 0.
+
+    Args:
+        var_names_to_values: Name: value dictionary.
+    '''
+    var_names_to_values['global_step'] = np.array(0)
 
 def from_canonical(new_format, var_names_to_values):
     '''Convert dictionary contents from 'canonical' to a new format.

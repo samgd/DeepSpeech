@@ -209,6 +209,11 @@ class TestConvertParams(unittest.TestCase):
 
             self.parameter_equality(new_params, exp_canonical)
 
+    def test_reset_global_step(self):
+        values = {'global_step': 100}
+        convert_params.reset_global_step(values)
+        self.assertEqual(values['global_step'], 0)
+
     #- Helpers -----------------------------------------------------------------
 
     def parameter_equality(self, new_params, exp_params):
