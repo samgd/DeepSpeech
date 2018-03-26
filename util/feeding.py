@@ -98,7 +98,7 @@ class DataSet(object):
     '''
     def __init__(self, name, csvs, target_batch_size, max_seq_len, skip=0, limit=0,
                  ascending=False, next_index=lambda i: i + 1,
-                 shuffle_batch_order=False, shuffle_seed=1234):
+                 shuffle_batch_order=True, shuffle_first_iteration=False, shuffle_seed=1234):
 
         self.name = name
         self.target_batch_size = target_batch_size
@@ -123,8 +123,14 @@ class DataSet(object):
 
         self.current_batch = -1
         self.n_batch = 0
+
         self.shuffle_batch_order = shuffle_batch_order
         self.shuffle_seed = shuffle_seed
+        if shuffle_batch_order and shuffle_first_iteration:
+            random.seed(self.shuffle_seed)
+            self.shuffle_seed += 3
+            random.shuffle(self.batch_indices)
+
         self._lock = Lock()
 
     def _create_batch_indices(self, multiple_of=8):

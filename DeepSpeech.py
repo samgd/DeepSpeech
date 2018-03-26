@@ -94,6 +94,11 @@ tf.app.flags.DEFINE_integer ('limit_train',      0,           'maximum number of
 tf.app.flags.DEFINE_integer ('limit_dev',        0,           'maximum number of elements to use from validation set- 0 means no limit')
 tf.app.flags.DEFINE_integer ('limit_test',       0,           'maximum number of elements to use from test set- 0 means no limit')
 
+# Shuffle
+
+tf.app.flags.DEFINE_boolean ('shuffle_train',       True,       'shuffle dataset after first epoch')
+tf.app.flags.DEFINE_boolean ('shuffle_first_epoch', False,      'shuffle first epoch if shuffle_train is True')
+
 # Sparsity
 
 tf.app.flags.DEFINE_integer ('begin_pruning_epoch',   0,        'the epoch at which to begin pruning')
@@ -1663,7 +1668,8 @@ def train(server=None):
                         FLAGS.max_seq_len,
                         limit=FLAGS.limit_train,
                         next_index=lambda i: COORD.get_next_index('train'),
-                        shuffle_batch_order=True)
+                        shuffle_batch_order=FLAGS.shuffle_train,
+                        shuffle_first_iteration=FLAGS.shuffle_first_epoch)
 
     # Reading validation set
     dev_set = DataSet('dev',
