@@ -1713,22 +1713,25 @@ def train(server=None):
     log_grads_and_vars(avg_tower_gradients)
 
     # Model pruning.
-    pruning_hparams = cudnn_pruning.get_pruning_hparams()
-    pruning_hparams.begin_pruning_step = FLAGS.begin_pruning_epoch * model_feeder.train.total_batches
-    pruning_hparams.sparsity_function_begin_step = pruning_hparams.begin_pruning_step
- 
-    pruning_hparams.end_pruning_step = FLAGS.end_pruning_epoch * model_feeder.train.total_batches
-    if pruning_hparams.end_pruning_step == 0:
-        pruning_hparams.end_pruning_step = FLAGS.epoch * model_feeder.train.total_batches
-    pruning_hparams.sparsity_function_end_step = pruning_hparams.end_pruning_step
-
-    pruning_hparams.pruning_frequency = FLAGS.pruning_frequency
-    pruning_hparams.target_sparsity = FLAGS.target_sparsity
-
-    p = cudnn_pruning.CudnnPruning(pruning_hparams, global_step=global_step)
-    mask_update_op = p.conditional_mask_update_op()
-    p.add_pruning_summaries()
-
+    if FLAGS.apply_mask:
+        pruning_hparams = cudnn_pruning.get_pruning_hparams()
+        pruning_hparams.begin_pruning_step = FLAGS.begin_pruning_epoch * model_feeder.train.total_batches
+        pruning_hparams.sparsity_function_begin_step = pruning_hparams.begin_pruning_step
+     
+        pruning_hparams.end_pruning_step = FLAGS.end_pruning_epoch * model_feeder.train.total_batches
+        if pruning_hparams.end_pruning_step == 0:
+            pruning_hparams.end_pruning_step = FLAGS.epoch * model_feeder.train.total_batches
+        pruning_hparams.sparsity_function_end_step = pruning_hparams.end_pruning_step
+    
+        pruning_hparams.pruning_frequency = FLAGS.pruning_frequency
+        pruning_hparams.target_sparsity = FLAGS.target_sparsity
+    
+        p = cudnn_pruning.CudnnPruning(pruning_hparams, global_step=global_step)
+        mask_update_op = p.conditional_mask_update_op()
+        p.add_pruning_summaries()
+    else:
+       mask_update_op = []
+    
     # Op to merge all summaries for the summary hook
     merge_all_summaries_op = tf.summary.merge_all()
 

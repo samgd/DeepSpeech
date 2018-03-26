@@ -175,7 +175,7 @@ def reset_global_step(var_names_to_values):
     Args:
         var_names_to_values: Name: value dictionary.
     '''
-    var_names_to_values['global_step'] = np.array(0)
+    var_names_to_values['global_step'] = np.array(0, dtype=np.int32)
 
 def from_canonical(new_format, var_names_to_values):
     '''Convert dictionary contents from 'canonical' to a new format.
