@@ -73,7 +73,7 @@ tf.app.flags.DEFINE_float   ('dropout_rate6',    -1.0,        'dropout rate for 
 tf.app.flags.DEFINE_float   ('relu_clip',        20.0,        'ReLU clipping value for non-recurrant layers')
 
 tf.app.flags.DEFINE_boolean ('half_precision',   False,       'use half-precision floating point when training')
-tf.app.flags.DEFINE_integer ('loss_scale',       1,           'loss scaling value to prevent fp16 underflow')
+tf.app.flags.DEFINE_float   ('loss_scale',       1.0,         'loss scaling value to prevent fp16 underflow')
 
 # Adam optimizer (http://arxiv.org/abs/1412.6980) parameters
 
@@ -247,7 +247,7 @@ def initialize_globals():
     global precision
     precision = tf.float16 if FLAGS.half_precision else tf.float32
 
-    if FLAGS.half_precision and FLAGS.loss_scale == 1:
+    if FLAGS.half_precision and FLAGS.loss_scale == 1.0:
         log_warn('Parameter --loss_scale is 1 when using --half_precision')
 
     # Set default checkpoint dir
@@ -666,7 +666,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     the decoded result and the batch's original Y.
     '''
     # Obtain the next batch of data
-    batch_x, batch_seq_len, batch_y, labels, labels_len = model_feeder.next_batch(tower)
+    batch_x, batch_seq_len, batch_y, flat_labels, labels_len = model_feeder.next_batch(tower)
 
     if FLAGS.log_level == 0:
         batch_seq_len = tf.Print(batch_seq_len,
@@ -689,10 +689,10 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     if FLAGS.use_warpctc:
         import warpctc_tensorflow
         total_loss = warpctc_tensorflow.ctc(activations=logits,
-                                            flat_labels=tf.to_int32(tf.reshape(labels, (-1,))),
-                                            label_lengths=tf.to_int32(labels_len),
-                                            input_lengths=tf.to_int32(batch_seq_len),
-                                            blank_label=alphabet.size() - 1)
+                                            flat_labels=flat_labels,
+                                            label_lengths=labels_len,
+                                            input_lengths=batch_seq_len,
+                                            blank_label=n_character - 1)
                                             
         #total_loss = tf.contrib.warpctc.warp_ctc_loss(labels=batch_y, inputs=logits, sequence_length=batch_seq_len)
     else:
@@ -1529,18 +1529,22 @@ class TrainingCoordinator(object):
         Returns:
             int. new data set index
         '''
-        with self._lock:
-            if is_chief:
-                member = '_index_' + set_name
-                value = getattr(self, member, -1)
-                setattr(self, member, value + 1)
-                return value
-            else:
-                # We are a remote worker and have to hand over to the chief worker by HTTP
-                log_traffic('Asking for next index...')
-                value = int(self._talk_to_chief(PREFIX_NEXT_INDEX + set_name))
-                log_traffic('Got index %d.' % value)
-                return value
+        has_lock = self._lock.acquire(False)
+        if not has_lock:
+            return None
+        if is_chief:
+            member = '_index_' + set_name
+            value = getattr(self, member, -1)
+            setattr(self, member, value + 1)
+            self._lock.release()
+            return value
+        else:
+            # We are a remote worker and have to hand over to the chief worker by HTTP
+            log_traffic('Asking for next index...')
+            value = int(self._talk_to_chief(PREFIX_NEXT_INDEX + set_name))
+            log_traffic('Got index %d.' % value)
+            self._lock.release()
+            return value
 
     def _get_job(self, worker=0):
         job = None
@@ -1750,10 +1754,12 @@ def train(server=None):
     if FLAGS.summary_secs > 0:
         hooks.append(tf.train.SummarySaverHook(save_secs=FLAGS.summary_secs, output_dir=FLAGS.summary_dir, summary_op=merge_all_summaries_op))
 
-    # Hook wih number of checkpoint files to save in checkpoint_dir
+    # Hook to save checkpoint after each epoch
     saver = tf.train.Saver(max_to_keep=FLAGS.max_to_keep)
-    if FLAGS.train and FLAGS.max_to_keep > 0:
-        hooks.append(tf.train.CheckpointSaverHook(checkpoint_dir=FLAGS.checkpoint_dir, save_secs=FLAGS.checkpoint_secs, saver=saver))
+    if FLAGS.train:
+        hooks.append(tf.train.CheckpointSaverHook(checkpoint_dir=FLAGS.checkpoint_dir,
+                                                  save_steps=model_feeder.train.total_batches,
+                                                  saver=saver))
 
     if len(FLAGS.initialize_from_frozen_model) > 0:
         with tf.gfile.FastGFile(FLAGS.initialize_from_frozen_model, 'rb') as fin:
@@ -1789,15 +1795,13 @@ def train(server=None):
 #                                          trace_steps=[],
 #                                          dump_steps=[]) as pctx:
 
-        # The MonitoredTrainingSession takes care of session initialization,
-        # restoring from a checkpoint, saving to a checkpoint, and closing when done
-        # or an error occurs.
+    # The MonitoredTrainingSession takes care of session initialization,
+    # restoring from a checkpoint, saving to a checkpoint, and closing when done
+    # or an error occurs.
     try:
         with tf.train.MonitoredTrainingSession(master='' if server is None else server.target,
                                                is_chief=is_chief,
                                                hooks=hooks,
-                                               checkpoint_dir=FLAGS.checkpoint_dir,
-                                               save_checkpoint_secs=FLAGS.checkpoint_secs if FLAGS.train else None,
                                                config=session_config) as session:
 
             if len(FLAGS.initialize_from_frozen_model) > 0:
@@ -1859,7 +1863,7 @@ def train(server=None):
                         if session.should_stop():
                             break
 
-                        #log_debug('Starting batch...')
+                        log_debug('Starting batch...')
                         # Compute the batch
                         _, current_step, batch_loss, batch_report = session.run([train_op, global_step, loss, report_params], **extra_params)
                         #pctx.profiler.profile_operations(options=opts)
@@ -1870,11 +1874,11 @@ def train(server=None):
                         # Add batch to loss
                         total_loss += batch_loss
 
-                        #if job.report and FLAGS.report_wer:
-                        #    # Collect individual sample results
-                        #    collect_results(report_results, batch_report[0])
-                        #    # Add batch to total_mean_edit_distance
-                        #    total_mean_edit_distance += batch_report[1]
+                        if job.report and FLAGS.report_wer:
+                            # Collect individual sample results
+                            collect_results(report_results, batch_report[0])
+                            # Add batch to total_mean_edit_distance
+                            total_mean_edit_distance += batch_report[1]
 
                     # Gathering job results
                     job.loss = total_loss / job.steps
@@ -1891,7 +1895,7 @@ def train(server=None):
                 traceback.print_exc()
                 # Calling all hook's end() methods to end blocking calls
                 for hook in hooks:
-                    hook.end(session)
+                    hook.end(get_session(session))
                 # Only chief has a SyncReplicasOptimizer queue runner that needs to be stopped for unblocking process exit.
                 # A rather graceful way to do this is by stopping the ps.
                 # Only one party can send it w/o failing.

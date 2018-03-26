@@ -1,8 +1,10 @@
 import numpy as np
 import os
+import copy
 import pandas
 import random
 import tensorflow as tf
+import time
 
 from math import ceil
 from six.moves import range
@@ -27,7 +29,7 @@ class ModelFeeder(object):
                  numcontext,
                  alphabet,
                  tower_feeder_count=-1,
-                 threads_per_queue=2,
+                 threads_per_queue=1,
                  dtype=tf.float32,
                  logdir=''):
 
@@ -43,6 +45,7 @@ class ModelFeeder(object):
         self.ph_x = tf.placeholder(dtype, [None, None, numcep + (2 * numcep * numcontext)])
         self.ph_x_length = tf.placeholder(tf.int32, [None,])
         self.ph_y = tf.placeholder(tf.int32, [None,None,])
+        self.ph_flat_y = tf.placeholder(tf.int32, [None,])
         self.ph_y_length = tf.placeholder(tf.int32, [None,])
         self.ph_batch_size = tf.placeholder(tf.int32, [])
         self.ph_queue_selector = tf.placeholder(tf.int32, name='Queue_Selector')
@@ -144,7 +147,9 @@ class DataSet(object):
             if current_batch_len + row[2] > max_batch_values:
                 # Ensure batch is a multiple of the desired number
                 split = (len(current_batch) // multiple_of) * multiple_of
-                batch_indices.append(current_batch[:split])
+                batch_multiple_of = current_batch[:split]
+                if batch_multiple_of: 
+                    batch_indices.append(batch_multiple_of)
                 current_batch = current_batch[split:]
                 current_batch_lens = current_batch_lens[split:]
                 current_batch_len = sum(current_batch_lens)
@@ -152,6 +157,7 @@ class DataSet(object):
             current_batch.append(i)
             current_batch_lens.append(row[2])
             current_batch_len += row[2]
+
         if current_batch:
             batch_indices.append(current_batch)
 
@@ -160,6 +166,8 @@ class DataSet(object):
     def next_batch_indices(self):
         with self._lock:
             idx = self.next_index(self.current_batch)
+            if idx is None:
+                return None
 
             if idx >= self.total_batches:
                 if (not self.total_batches or
@@ -172,9 +180,7 @@ class DataSet(object):
             self.n_batch += 1
             next_batch = self.batch_indices[idx]
             self.current_batch = idx
-
-        return next_batch
-
+	    return next_batch
 
 class _DataSetLoader(object):
     '''
@@ -187,10 +193,10 @@ class _DataSetLoader(object):
         self._model_feeder = model_feeder
         self._data_set = data_set
         max_queued_batches = 10
-        self.queue = tf.PaddingFIFOQueue(shapes=[[None, None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [None,], [None,None,], [None,]],
-                                         dtypes=[dtype, tf.int32, tf.int32, tf.int32],
+        self.queue = tf.PaddingFIFOQueue(shapes=[[None, None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [None,], [None,None,], [None,], [None,]],
+                                         dtypes=[dtype, tf.int32, tf.int32, tf.int32, tf.int32],
                                          capacity=max_queued_batches)
-        self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_y_length])
+        self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_flat_y, model_feeder.ph_y_length])
         self._close_op = self.queue.close(cancel_pending_enqueues=True)
         self._size_op = self.queue.size()
         self._size_summary = tf.summary.scalar('%s queue size' % data_set.name,
@@ -206,7 +212,7 @@ class _DataSetLoader(object):
         '''
         Starts concurrent queue threads for reading samples from the data set.
         '''
-        queue_threads = [Thread(target=self._populate_batch_queue, args=(session, coord))
+        queue_threads = [Thread(target=self._populate_batch_queue, args=(session, coord, self._data_set.name))
                          for i in range(self._model_feeder.threads_per_queue)]
         for queue_thread in queue_threads:
             coord.register_thread(queue_thread)
@@ -224,18 +230,23 @@ class _DataSetLoader(object):
         session.run(self._close_op)
         self._file_writer.close()
 
-    def _populate_batch_queue(self, session, coord):
+    def _populate_batch_queue(self, session, coord, name):
         '''
         Queue thread routine.
         '''
-        run_options = tf.RunOptions(timeout_in_ms=10000)
+        run_options = tf.RunOptions(timeout_in_ms=100)
 
         while not coord.should_stop():
             batch_x, batch_x_len = [], []
             batch_y, batch_y_len = [], []
             max_x, max_y = (0, 0)   # Used to pad each source before concat.
 
-            for index in self._data_set.next_batch_indices():
+            indices = self._data_set.next_batch_indices()
+            if indices is None:
+                time.sleep(0.1)
+                continue
+
+            for index in indices:
                 wav_file, transcript, _ = self._data_set.files[index]
                 source = audiofile_to_input_vector(wav_file, self._model_feeder.numcep, self._model_feeder.numcontext)
                 source_len = len(source)
@@ -270,20 +281,24 @@ class _DataSetLoader(object):
 
             stack_x = np.stack(padded_batch_x)
             stack_y = np.stack(padded_batch_y)
+            flat_y = np.concatenate(batch_y)
 
             queued = False
-            while not queued and not coord.should_stop():
+            while not queued:
+                if coord.should_stop():
+                    return
                 try:
                     summary_str, _ = session.run([self._size_summary, self._enqueue_op],
                                                  feed_dict={ self._model_feeder.ph_x: stack_x,
                                                              self._model_feeder.ph_x_length: batch_x_len,
                                                              self._model_feeder.ph_y: stack_y,
+                                                             self._model_feeder.ph_flat_y: flat_y,
                                                              self._model_feeder.ph_y_length: batch_y_len },
                                                  options=run_options)
                     self._file_writer.add_summary(summary_str)
                     queued = True
                 except tf.errors.DeadlineExceededError:
-                    pass
+                    continue
                 except tf.errors.CancelledError:
                     return
 
@@ -305,9 +320,9 @@ class _TowerFeeder(object):
         '''
         Draw the next batch from from the combined switchable queue.
         '''
-        source, source_lengths, target, target_lengths = self._queue.dequeue()
+        source, source_lengths, target, flat_target, target_lengths = self._queue.dequeue()
         sparse_labels = ctc_label_dense_to_sparse(target, target_lengths)
-        return source, source_lengths, sparse_labels, target, target_lengths#sparse_labels, t
+        return source, source_lengths, sparse_labels, flat_target, target_lengths
 
     def start_queue_threads(self, session, coord):
         '''
