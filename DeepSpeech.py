@@ -1818,9 +1818,13 @@ def train(server=None):
         training_graph = tf.get_default_graph()
 
         assign_ops = []
+        init_from_ckpt_dict = {}
         for name, restored_tensor in var_names_to_values.items():
             training_tensor = training_graph.get_tensor_by_name(name + ':0')
-            assign_ops.append(tf.assign(training_tensor, restored_tensor))
+            placehold = tf.placeholder(restored_tensor.dtype,
+                                       shape=restored_tensor.shape)
+            init_from_ckpt_dict[placehold] = restored_tensor
+            assign_ops.append(tf.assign(training_tensor, placehold))
 
         init_from_checkpoint_op = tf.group(*assign_ops)
         log_info('restoring variables from checkpoint: %s' % var_names_to_values.keys())
@@ -1858,7 +1862,7 @@ def train(server=None):
                 log_info('Initializing from checkpoint: {}'.format(FLAGS.initialize_from_checkpoint))
                 if len(FLAGS.initialize_from_frozen_model) > 0:
                     log_warn('Frozen model initialization will be overwritten.')
-                get_session(session).run(init_from_checkpoint_op)
+                get_session(session).run(init_from_checkpoint_op, init_from_ckpt_dict)
 
             try:
                 if is_chief:
