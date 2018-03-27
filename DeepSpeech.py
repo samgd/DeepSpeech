@@ -19,9 +19,11 @@ import inspect
 
 from six.moves import zip, range, filter, urllib, BaseHTTPServer
 from tensorflow.contrib.cudnn_rnn.ops import gen_cudnn_rnn_ops
+from tensorflow.contrib.framework import assign_from_values
 from tensorflow.contrib.session_bundle import exporter
 from tensorflow.python.tools import freeze_graph
 from threading import Thread, Lock
+from util.convert_params import get_tensors
 from util.npy_audio import audiofile_to_input_vector
 from util.feeding import DataSet, ModelFeeder
 from util.gpu import get_available_gpus
@@ -1810,6 +1812,19 @@ def train(server=None):
 
         init_from_frozen_model_op = tf.group(*assign_ops)
 
+    if len(FLAGS.initialize_from_checkpoint) > 0:
+        var_names_to_values = get_tensors(FLAGS.initialize_from_checkpoint)
+
+        training_graph = tf.get_default_graph()
+
+        assign_ops = []
+        for name, restored_tensor in var_names_to_values.items():
+            training_tensor = training_graph.get_tensor_by_name(name + ':0')
+            assign_ops.append(tf.assign(training_tensor, restored_tensor))
+
+        init_from_checkpoint_op = tf.group(*assign_ops)
+        log_info('restoring variables from checkpoint: %s' % var_names_to_values.keys())
+
     def get_session(sess):
         session = sess
         while type(session).__name__ != 'Session':
@@ -1843,7 +1858,7 @@ def train(server=None):
                 log_info('Initializing from checkpoint: {}'.format(FLAGS.initialize_from_checkpoint))
                 if len(FLAGS.initialize_from_frozen_model) > 0:
                     log_warn('Frozen model initialization will be overwritten.')
-                saver.restore(get_session(session), FLAGS.initialize_from_checkpoint)
+                get_session(session).run(init_from_checkpoint_op)
 
             try:
                 if is_chief:
