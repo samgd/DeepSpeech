@@ -265,6 +265,14 @@ def initialize_globals():
     if FLAGS.half_precision and FLAGS.loss_scale == 1.0:
         log_warn('Parameter --loss_scale is 1 when using --half_precision')
 
+    global ph_dropout
+    ph_dropout = [ tf.placeholder(precision, shape=[], name='dropout_rate'),
+                   tf.placeholder(precision, shape=[], name='dropout_rate2'),
+                   tf.placeholder(precision, shape=[], name='dropout_rate3'),
+                   tf.placeholder(precision, shape=[], name='dropout_rate4'),
+                   tf.placeholder(precision, shape=[], name='dropout_rate5'),
+                   tf.placeholder(precision, shape=[], name='dropout_rate6') ]
+
     # Set default checkpoint dir
     if len(FLAGS.checkpoint_dir) == 0:
         FLAGS.checkpoint_dir = xdg.save_data_path(os.path.join('deepspeech','checkpoints'))
@@ -809,7 +817,7 @@ def get_tower_results(model_feeder, optimizer, is_training):
                     # Calculate the sum_loss and mean_edit_distance and retrieve the decoded
                     # batch along with the original batch's labels (Y) of this tower
                     total_loss, sum_loss, distance, mean_edit_distance, decoded, labels = \
-                        calculate_mean_edit_distance_and_loss(model_feeder, i, no_dropout if optimizer is None else dropout_rates, is_training)
+                        calculate_mean_edit_distance_and_loss(model_feeder, i, no_dropout if optimizer is None else ph_dropout, is_training)
 
                     # Allow for variables to be re-used by the next tower
                     tf.get_variable_scope().reuse_variables()
@@ -1906,9 +1914,13 @@ def train(server=None):
                     else:
                         report_params = []
 
-                    loss_summary = train_loss_summary if job.set_name == 'train' else []
+                    loss_summary_op = train_loss_summary if job.set_name == 'train' else []
 
                     # So far the only extra parameter is the feed_dict
+                    if job.set_name == 'train':
+                        feed_dict.update(zip(ph_dropout, dropout_rates))
+                    else:
+                        feed_dict.update(zip(ph_dropout, no_dropout))
                     extra_params = { 'feed_dict': feed_dict }
 
                     # Loop over the batches
@@ -1920,9 +1932,9 @@ def train(server=None):
 
                         log_debug('Starting batch...')
                         # Compute the batch
-                        _, current_step, batch_loss, batch_report, _, loss_sum = session.run([train_op, global_step, loss, report_params, mask_update_op, loss_summary], **extra_params)
+                        _, current_step, batch_loss, batch_report, _, loss_sum = session.run([train_op, global_step, loss, report_params, mask_update_op, loss_summary_op], **extra_params)
 
-                        if train_loss_writer:
+                        if train_loss_writer and job.set_name == 'train':
                             train_loss_writer.add_summary(loss_sum, current_step)
                         #pctx.profiler.profile_operations(options=opts)
 
@@ -1940,6 +1952,10 @@ def train(server=None):
 
                     # Gathering job results
                     job.loss = total_loss / job.steps
+                    if train_loss_writer and job.set_name == 'dev':
+                        dev_summary = tf.Summary(value=[tf.Summary.Value(tag='dev_loss', simple_value=job.loss)])
+                        train_loss_writer.add_summary(dev_summary, current_step)
+
                     if job.report and FLAGS.report_wer:
                         job.mean_edit_distance = total_mean_edit_distance / job.steps
                         job.wer, job.samples = calculate_report(report_results)

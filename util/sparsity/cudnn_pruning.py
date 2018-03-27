@@ -11,7 +11,24 @@ _CUDNN_THRESHOLD_COLLECTION = 'cudnn_thresholds'
 _CUDNN_MASKED_WEIGHT_COLLECTION = 'cudnn_masked_weights'
 _CUDNN_WEIGHT_COLLECTION = 'cudnn_kernel'
 _CUDNN_MASKED_WEIGHT_NAME = 'weights/cudnn_masked_weights'
-_CUDNN_PARAMS = 'cudnn_params'
+
+_CUDNN_PARAMS_RNN_MODE   = 'cudnn_params_rnn_mode'
+_CUDNN_PARAMS_NUM_LAYERS = 'cudnn_params_num_layers'
+_CUDNN_PARAMS_NUM_UNITS  = 'cudnn_params_num_units'
+_CUDNN_PARAMS_SHAPE      = 'cudnn_params_shape'
+_CUDNN_PARAMS_MODE       = 'cudnn_params_mode'
+_CUDNN_PARAMS_DIR        = 'cudnn_params_dir'
+_CUDNN_PARAMS_DO         = 'cudnn_params_do'
+_CUDNN_PARAMS_SEED       = 'cudnn_params_seed'
+
+_CUDNN_PARAMS = [_CUDNN_PARAMS_RNN_MODE,
+                 _CUDNN_PARAMS_NUM_LAYERS,
+                 _CUDNN_PARAMS_NUM_UNITS,
+                 _CUDNN_PARAMS_SHAPE,
+                 _CUDNN_PARAMS_MODE,
+                 _CUDNN_PARAMS_DIR,
+                 _CUDNN_PARAMS_DO,
+                 _CUDNN_PARAMS_SEED]
 
 class MaskedCudnnLSTM(cudnn_rnn.CudnnLSTM):
 
@@ -88,7 +105,8 @@ class MaskedCudnnLSTM(cudnn_rnn.CudnnLSTM):
                       self._direction,
                       self._dropout,
                       self._seed]
-            tf.add_to_collection(_CUDNN_PARAMS, np.array(params, dtype=object))
+            for collection, param in zip(_CUDNN_PARAMS, params):
+                tf.add_to_collection(collection, param)
 
         self.built = True
 
@@ -136,7 +154,8 @@ def get_cudnn_weights():
     return tf.get_collection(_CUDNN_WEIGHT_COLLECTION)
 
 def get_cudnn_params():
-    return tf.get_collection(_CUDNN_PARAMS)
+    collections = [tf.get_collection(collection) for collection in _CUDNN_PARAMS]
+    return zip(*collections)
 
 class CudnnPruning(pruning.Pruning):
 
