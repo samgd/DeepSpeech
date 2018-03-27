@@ -1785,7 +1785,7 @@ def train(server=None):
     if FLAGS.summary_steps > 0:
         hooks.append(tf.train.SummarySaverHook(save_steps=FLAGS.summary_steps, output_dir=FLAGS.summary_dir, summary_op=merge_all_summaries_op))
         train_loss_summary = tf.summary.scalar('train_loss', loss, collections=[])
-        train_loss_writer = tf.summary.FileWriter(FLAGS.summary_dir)
+        train_loss_writer = tf.summary.FileWriter(os.path.join(FLAGS.summary_dir, 'loss'))
     else:
         train_loss_summary = []
         train_loss_writer = None

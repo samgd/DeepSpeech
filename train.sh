@@ -46,7 +46,7 @@ python -u DeepSpeech.py \
   --wer_log_pattern "GLOBAL LOG: logwer('', '%s', '%s', %f)" \
   --log_level 0 \
   --display_step 0 \
-  --summary_steps 10 \
+  --summary_steps 100 \
   --summary_dir "$checkpoint_dir/summaries" \
   --checkpoint_secs 300 \
   --checkpoint_dir "$checkpoint_dir/checkpoints" \
@@ -56,7 +56,7 @@ python -u DeepSpeech.py \
   --notest \
   --validation_step 1 \
   --shuffle_train \
-  --shuffle_first_epoch
+  --shuffle_first_epoch \
   --apply_mask \
   --begin_pruning_epoch 0 \
   --end_pruning_epoch 0 \
