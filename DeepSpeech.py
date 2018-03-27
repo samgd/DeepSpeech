@@ -1784,6 +1784,11 @@ def train(server=None):
     # Hook to save TensorBoard summaries
     if FLAGS.summary_steps > 0:
         hooks.append(tf.train.SummarySaverHook(save_steps=FLAGS.summary_steps, output_dir=FLAGS.summary_dir, summary_op=merge_all_summaries_op))
+        train_loss_summary = tf.summary.scalar('train_loss', loss, collections=[])
+        train_loss_writer = tf.summary.FileWriter(FLAGS.summary_dir)
+    else:
+        train_loss_summary = []
+        train_loss_writer = None
 
     # Hook to save checkpoint after each epoch
     saver = tf.train.Saver(max_to_keep=FLAGS.max_to_keep)
@@ -1901,6 +1906,8 @@ def train(server=None):
                     else:
                         report_params = []
 
+                    loss_summary = train_loss_summary if job.set_name == 'train' else []
+
                     # So far the only extra parameter is the feed_dict
                     extra_params = { 'feed_dict': feed_dict }
 
@@ -1913,7 +1920,10 @@ def train(server=None):
 
                         log_debug('Starting batch...')
                         # Compute the batch
-                        _, current_step, batch_loss, batch_report, _ = session.run([train_op, global_step, loss, report_params, mask_update_op], **extra_params)
+                        _, current_step, batch_loss, batch_report, _, loss_sum = session.run([train_op, global_step, loss, report_params, mask_update_op, loss_summary], **extra_params)
+
+                        if train_loss_writer:
+                            train_loss_writer.add_summary(loss_sum, current_step)
                         #pctx.profiler.profile_operations(options=opts)
 
                         # Uncomment the next line for debugging race conditions / distributed TF
