@@ -97,7 +97,7 @@ class DataSet(object):
     is taken modulo the total number of batches.
     '''
     def __init__(self, name, csvs, target_batch_size, max_seq_len, skip=0, limit=0,
-                 ascending=False, next_index=lambda i: i + 1,
+                 ascending=True, next_index=lambda i: i + 1,
                  shuffle_batch_order=True, shuffle_first_iteration=False, shuffle_seed=1234):
 
         self.name = name

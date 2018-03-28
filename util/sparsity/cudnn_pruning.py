@@ -141,6 +141,21 @@ class MaskedCudnnLSTM(cudnn_rnn.CudnnLSTM):
         else:
             return outputs, (output_h,)
 
+def _tensor_sparsity(tensor):
+    '''Returns sparsity of a given Tensor.'''
+    return tf.reduce_sum(tf.cast(tf.equal(tensor, 0.0), tf.float32)) / tf.size(tensor, out_type=tf.float32)
+
+def get_weight_sparsity():
+    all_masks = get_masks()
+    sparsity_percents = [_tensor_sparsity(t) for t in all_masks]
+    mean_sparsity = tf.add_n(sparsity_percents) / len(sparsity_percents)
+    return mean_sparsity
+
+def get_masks():
+    masks = pruning.get_masks()
+    cudnn_masks = get_cudnn_masks()
+    return masks + cudnn_masks
+
 def get_cudnn_masked_weights():
     return tf.get_collection(_CUDNN_MASKED_WEIGHT_COLLECTION)
 

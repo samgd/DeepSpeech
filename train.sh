@@ -18,7 +18,7 @@ if [ ! -f "${COMPUTE_DATA_DIR}/librivox-train-clean-100.csv" ]; then
          "importer script at bin/import_librivox.py before running this script."
 fi;
 
-COMPUTE_KEEP_DIR="$HOME/efs/gradual_prune/initial_test"
+COMPUTE_KEEP_DIR="$HOME/efs/gradual_prune/do_test/"
 
 if [ -d "${COMPUTE_KEEP_DIR}" ]; then
     checkpoint_dir=$COMPUTE_KEEP_DIR
@@ -32,10 +32,10 @@ python -u DeepSpeech.py \
   --test_files "$COMPUTE_DATA_DIR/librivox-dev-clean.csv" \
   --initialize_from_checkpoint "$HOME/Code/DeepSpeech/models/mixed_cudnn_checkpoint/model.ckpt-0" \
   --noreport_wer \
-  --epoch 10 \
+  --epoch 18 \
   --target_batch_size 64 \
   --max_seq_len 850 \
-  --target_learning_rate 0.000000520 \
+  --target_learning_rate 0.00000078125 \
   --n_hidden 2048 \
   --lstm_type cudnn \
   --half_precision \
@@ -51,15 +51,14 @@ python -u DeepSpeech.py \
   --checkpoint_secs 300 \
   --checkpoint_dir "$checkpoint_dir/checkpoints" \
   --report_count 10000 \
-  --max_to_keep 12 \
+  --max_to_keep 20 \
   --use_warpctc \
   --notest \
   --validation_step 1 \
-  --shuffle_train \
-  --shuffle_first_epoch \
   --apply_mask \
   --begin_pruning_epoch 0 \
-  --end_pruning_epoch 0 \
-  --pruning_frequency 100 \
-  --target_sparsity 0.90 \
+  --end_pruning_epoch 12 \
+  --pruning_frequency 3351  \
+  --target_sparsity 0.9 \
+  --noshuffle_train \
   "$@"

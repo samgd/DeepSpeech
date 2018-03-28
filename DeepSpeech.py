@@ -8,6 +8,7 @@ import sys
 log_level_index = sys.argv.index('--log_level') + 1 if '--log_level' in sys.argv else 0
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'#sys.argv[log_level_index] if log_level_index > 0 and log_level_index < len(sys.argv) else '3'
 
+import copy
 import datetime
 import pickle
 import shutil
@@ -103,6 +104,7 @@ tf.app.flags.DEFINE_boolean ('shuffle_first_epoch', False,      'shuffle first e
 
 # Sparsity
 
+tf.app.flags.DEFINE_boolean ('apply_mask',       False,       'load and apply binary masks to the trainable variables.')
 tf.app.flags.DEFINE_integer ('begin_pruning_epoch',   0,        'the epoch at which to begin pruning')
 tf.app.flags.DEFINE_integer ('end_pruning_epoch',     0,        'the epoch at which to terminate pruning - 0 means use epoch')
 tf.app.flags.DEFINE_integer ('pruning_frequency',     50,       'steps per mask update')
@@ -147,10 +149,6 @@ tf.app.flags.DEFINE_integer ('n_hidden',         2048,        'layer width to us
 # LSTM Implementation
 
 tf.app.flags.DEFINE_string  ('lstm_type',        'basic',     'LSTM implementation to use')
-
-# Masking
-
-tf.app.flags.DEFINE_boolean ('apply_mask',       False,       'load and apply binary masks to the trainable variables.')
 
 # Initialization
 
@@ -803,6 +801,13 @@ def get_tower_results(model_feeder, optimizer, is_training):
     # To calculate the sum of the losses
     tower_sum_losses = []
 
+    # Compute dropout Tesnors if any
+    dropout_param = no_dropout
+    if optimizer is not None:
+        dropout_param = ph_dropout
+        for do in dropout_param:
+            tf.summary.scalar(do.name, do)
+
     with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
         # Loop over available_devices
         for i in range(len(available_devices)):
@@ -817,7 +822,7 @@ def get_tower_results(model_feeder, optimizer, is_training):
                     # Calculate the sum_loss and mean_edit_distance and retrieve the decoded
                     # batch along with the original batch's labels (Y) of this tower
                     total_loss, sum_loss, distance, mean_edit_distance, decoded, labels = \
-                        calculate_mean_edit_distance_and_loss(model_feeder, i, no_dropout if optimizer is None else ph_dropout, is_training)
+                        calculate_mean_edit_distance_and_loss(model_feeder, i, dropout_param, is_training)
 
                     # Allow for variables to be re-used by the next tower
                     tf.get_variable_scope().reuse_variables()
@@ -1663,6 +1668,12 @@ def send_token_to_ps(session, kill=False):
         session.run(enqueue, feed_dict={ token_placeholder: token })
         log_debug('Sent %s token to ps %d.' % (kind, index))
 
+def nonzero_percent():
+    if not FLAGS.apply_mask:
+        return tf.constant(1.0)
+    nonzero = 1.0 - cudnn_pruning.get_weight_sparsity()
+    return nonzero
+
 def train(server=None):
     r'''
     Trains the network on a given server of a cluster.
@@ -1743,11 +1754,14 @@ def train(server=None):
         pruning_hparams = cudnn_pruning.get_pruning_hparams()
         pruning_hparams.begin_pruning_step = FLAGS.begin_pruning_epoch * model_feeder.train.total_batches
         pruning_hparams.sparsity_function_begin_step = pruning_hparams.begin_pruning_step
+
+        pruning_hparams.threshold_decay = 0.0
      
-        pruning_hparams.end_pruning_step = FLAGS.end_pruning_epoch * model_feeder.train.total_batches
+        pruning_hparams.end_pruning_step = -1 #FLAGS.end_pruning_epoch * model_feeder.train.total_batches
         if pruning_hparams.end_pruning_step == 0:
             pruning_hparams.end_pruning_step = FLAGS.epoch * model_feeder.train.total_batches
-        pruning_hparams.sparsity_function_end_step = pruning_hparams.end_pruning_step
+        
+        pruning_hparams.sparsity_function_end_step = FLAGS.end_pruning_epoch * model_feeder.train.total_batches
     
         pruning_hparams.pruning_frequency = FLAGS.pruning_frequency
         pruning_hparams.target_sparsity = FLAGS.target_sparsity
@@ -1757,6 +1771,12 @@ def train(server=None):
         p.add_pruning_summaries()
     else:
        mask_update_op = []
+
+    # Droput scaling parameter
+    nonzero = nonzero_percent()
+    tf.summary.scalar('nonzero_percent', nonzero)
+    dropout_scale = tf.sqrt(nonzero)
+    train_dropout_rates = copy.copy(dropout_rates)
     
     # Op to merge all summaries for the summary hook
     merge_all_summaries_op = tf.summary.merge_all()
@@ -1918,7 +1938,7 @@ def train(server=None):
 
                     # So far the only extra parameter is the feed_dict
                     if job.set_name == 'train':
-                        feed_dict.update(zip(ph_dropout, dropout_rates))
+                        feed_dict.update(zip(ph_dropout, train_dropout_rates))
                     else:
                         feed_dict.update(zip(ph_dropout, no_dropout))
                     extra_params = { 'feed_dict': feed_dict }
@@ -1932,7 +1952,17 @@ def train(server=None):
 
                         log_debug('Starting batch...')
                         # Compute the batch
-                        _, current_step, batch_loss, batch_report, _, loss_sum = session.run([train_op, global_step, loss, report_params, mask_update_op, loss_summary_op], **extra_params)
+                        _, current_step, batch_loss, batch_report, _, loss_sum, job_do_scale = session.run([train_op,
+                                                                                                            global_step,
+                                                                                                            loss,
+                                                                                                            report_params,
+                                                                                                            mask_update_op,
+                                                                                                            loss_summary_op,
+                                                                                                            dropout_scale],
+                                                                                                            **extra_params)
+
+                        for i in range(len(train_dropout_rates)):
+                            train_dropout_rates[i] = dropout_rates[i] * job_do_scale
 
                         if train_loss_writer and job.set_name == 'train':
                             train_loss_writer.add_summary(loss_sum, current_step)
