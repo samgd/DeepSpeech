@@ -47,7 +47,6 @@ class ModelFeeder(object):
         self.ph_y = tf.placeholder(tf.int32, [None,None,])
         self.ph_flat_y = tf.placeholder(tf.int32, [None,])
         self.ph_y_length = tf.placeholder(tf.int32, [None,])
-        self.ph_batch_size = tf.placeholder(tf.int32, [])
         self.ph_queue_selector = tf.placeholder(tf.int32, name='Queue_Selector')
 
         self._tower_feeders = [_TowerFeeder(self, i, alphabet, dtype, logdir) for i in range(self.tower_feeder_count)]
@@ -169,6 +168,11 @@ class DataSet(object):
 
         return batch_indices
 
+    @property
+    def mean_batch_size(self):
+        batch_lens = [len(batch) for batch in self.batch_indices]
+        return float(sum(batch_lens)) / len(batch_lens)
+
     def next_batch_indices(self):
         with self._lock:
             idx = self.next_index(self.current_batch)
@@ -199,10 +203,10 @@ class _DataSetLoader(object):
         self._model_feeder = model_feeder
         self._data_set = data_set
         max_queued_batches = 10
-        self.queue = tf.PaddingFIFOQueue(shapes=[[None, None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [None,], [None,None,], [None,], [None,], []],
-                                         dtypes=[dtype, tf.int32, tf.int32, tf.int32, tf.int32, tf.int32],
+        self.queue = tf.PaddingFIFOQueue(shapes=[[None, None, model_feeder.numcep + (2 * model_feeder.numcep * model_feeder.numcontext)], [None,], [None,None,], [None,], [None,]],
+                                         dtypes=[dtype, tf.int32, tf.int32, tf.int32, tf.int32],
                                          capacity=max_queued_batches)
-        self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_flat_y, model_feeder.ph_y_length, model_feeder.ph_batch_size])
+        self._enqueue_op = self.queue.enqueue([model_feeder.ph_x, model_feeder.ph_x_length, model_feeder.ph_y, model_feeder.ph_flat_y, model_feeder.ph_y_length])
         self._close_op = self.queue.close(cancel_pending_enqueues=True)
         self._size_op = self.queue.size()
         self._size_summary = tf.summary.scalar('%s queue size' % data_set.name,
@@ -299,8 +303,7 @@ class _DataSetLoader(object):
                                                              self._model_feeder.ph_x_length: batch_x_len,
                                                              self._model_feeder.ph_y: stack_y,
                                                              self._model_feeder.ph_flat_y: flat_y,
-                                                             self._model_feeder.ph_y_length: batch_y_len,
-                                                             self._model_feeder.ph_batch_size: len(batch_x_len) },
+                                                             self._model_feeder.ph_y_length: batch_y_len },
                                                  options=run_options)
                     self._file_writer.add_summary(summary_str)
                     queued = True
@@ -327,9 +330,9 @@ class _TowerFeeder(object):
         '''
         Draw the next batch from from the combined switchable queue.
         '''
-        source, source_lengths, target, flat_target, target_lengths, batch_size = self._queue.dequeue()
+        source, source_lengths, target, flat_target, target_lengths = self._queue.dequeue()
         sparse_labels = ctc_label_dense_to_sparse(target, target_lengths)
-        return source, source_lengths, sparse_labels, flat_target, target_lengths, batch_size
+        return source, source_lengths, sparse_labels, flat_target, target_lengths
 
     def start_queue_threads(self, session, coord):
         '''

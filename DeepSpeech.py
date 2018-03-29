@@ -88,7 +88,8 @@ tf.app.flags.DEFINE_float   ('target_learning_rate',    0.001,       'learning r
 
 # Batch sizes
 
-tf.app.flags.DEFINE_integer ('target_batch_size', 1,          'number of elements in a training batch')
+tf.app.flags.DEFINE_integer ('target_batch_size', 1,          'desired number of elements in a training batch')
+tf.app.flags.DEFINE_integer ('gpu_batch_size',    1,          'actual number of elements in a training batch')
 tf.app.flags.DEFINE_integer ('max_seq_len',       925,        'maximum sequence length to achieve target batch size')
 
 # Sample limits
@@ -673,7 +674,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     the decoded result and the batch's original Y.
     '''
     # Obtain the next batch of data
-    batch_x, batch_seq_len, batch_y, flat_labels, labels_len, batch_size = model_feeder.next_batch(tower)
+    batch_x, batch_seq_len, batch_y, flat_labels, labels_len = model_feeder.next_batch(tower)
 
     if FLAGS.log_level == 0:
         batch_seq_len = tf.Print(batch_seq_len,
@@ -704,8 +705,8 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     else:
         total_loss = tf.nn.ctc_loss(labels=batch_y, inputs=logits, sequence_length=batch_seq_len)
 
-    # Calculate the mean loss across the batch
-    avg_loss = tf.reduce_mean(total_loss)
+    # Calculate the sum loss across the batch
+    sum_loss = tf.reduce_sum(total_loss)
 
     # Beam search decode the batch
     decoded, _ = decode_with_lm(logits, batch_seq_len, merge_repeated=False, beam_width=FLAGS.beam_width)
@@ -723,7 +724,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     # - the recognition mean edit distance,
     # - the decoded batch and
     # - the original batch_y (which contains the verified transcriptions).
-    return total_loss, avg_loss, distance, mean_edit_distance, decoded, batch_y, batch_size
+    return total_loss, sum_loss, distance, mean_edit_distance, decoded, batch_y
 
 
 # Adam Optimization
@@ -799,9 +800,7 @@ def get_tower_results(model_feeder, is_training):
     tower_mean_edit_distances = []
 
     # To calculate the avg of the losses
-    tower_avg_losses = []
-
-    tower_avg_batch_size = []
+    tower_sum_losses = []
 
     # Compute dropout Tensors if any
     dropout_param = ph_dropout
@@ -821,7 +820,7 @@ def get_tower_results(model_feeder, is_training):
                 with tf.name_scope('tower_%d' % i) as scope:
                     # Calculate the avg_loss and mean_edit_distance and retrieve the decoded
                     # batch along with the original batch's labels (Y) of this tower
-                    total_loss, avg_loss, distance, mean_edit_distance, decoded, labels, batch_size = \
+                    total_loss, sum_loss, distance, mean_edit_distance, decoded, labels = \
                         calculate_mean_edit_distance_and_loss(model_feeder, i, dropout_param, is_training)
 
                     # Allow for variables to be re-used by the next tower
@@ -843,7 +842,7 @@ def get_tower_results(model_feeder, is_training):
                     # Apply loss-scaling to improve numerical stability
                     trainable_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
                     gradients = tf.gradients(xs=trainable_vars,
-                                             ys=FLAGS.loss_scale * avg_loss)
+                                             ys=FLAGS.loss_scale * (sum_loss / model_feeder.train.mean_batch_size))
                     # Retain tower's gradients
                     tower_gradients.append(list(zip(gradients, trainable_vars)))
 
@@ -851,16 +850,13 @@ def get_tower_results(model_feeder, is_training):
                     tower_mean_edit_distances.append(mean_edit_distance)
 
                     # Retain tower's summed losses
-                    tower_avg_losses.append(avg_loss)
-
-                    tower_avg_batch_size.append(batch_size)
+                    tower_sum_losses.append(sum_loss)
 
     # Return the results tuple, the gradients, and the means of mean edit distances and losses
     return (tower_labels, tower_decodings, tower_distances, tower_total_losses), \
            tower_gradients, \
            tf.reduce_mean(tower_mean_edit_distances, 0), \
-           tf.reduce_mean(tower_avg_losses, 0), \
-           tf.reduce_mean(tower_avg_batch_size, 0)
+           tf.reduce_mean(tower_sum_losses, 0), \
 
 
 def average_gradients(tower_gradients):
@@ -1709,7 +1705,7 @@ def train(server=None):
     # Reading training set
     train_set = DataSet('train',
                         FLAGS.train_files.split(','),
-                        FLAGS.target_batch_size,
+                        FLAGS.gpu_batch_size,
                         FLAGS.max_seq_len,
                         limit=FLAGS.limit_train,
                         next_index=lambda i: COORD.get_next_index('train'),
@@ -1719,7 +1715,7 @@ def train(server=None):
     # Reading validation set
     dev_set = DataSet('dev',
                       FLAGS.dev_files.split(','),
-                      FLAGS.target_batch_size,
+                      FLAGS.gpu_batch_size,
                       FLAGS.max_seq_len,
                       limit=FLAGS.limit_dev,
                       next_index=lambda i: COORD.get_next_index('dev'))
@@ -1727,7 +1723,7 @@ def train(server=None):
     # Reading test set
     test_set = DataSet('test',
                        FLAGS.test_files.split(','),
-                       FLAGS.target_batch_size,
+                       FLAGS.gpu_batch_size,
                        FLAGS.max_seq_len,
                        limit=FLAGS.limit_test,
                        next_index=lambda i: COORD.get_next_index('test'))
@@ -1746,10 +1742,12 @@ def train(server=None):
     is_training = tf.placeholder(tf.bool, shape=[], name='is_training')
 
     # Get the data_set specific graph end-points
-    results_tuple, gradients, mean_edit_distance, loss, batch_size = get_tower_results(model_feeder, is_training)
+    results_tuple, gradients, mean_edit_distance, loss = get_tower_results(model_feeder, is_training)
 
     # Create the optimizer
-    learning_rate = tf.constant(FLAGS.target_learning_rate) * tf.cast(batch_size, tf.float32)
+    alpha = model_feeder.train.mean_batch_size / FLAGS.target_batch_size
+    log_info('learning rate alpha scale: %f' % alpha)
+    learning_rate = FLAGS.target_learning_rate * alpha
     optimizer = create_optimizer(learning_rate)
 
     # Synchronous distributed training is facilitated by a special proxy-optimizer
@@ -1797,7 +1795,6 @@ def train(server=None):
 
     # Apply gradients to modify the model
     apply_gradient_op = optimizer.apply_gradients(avg_tower_gradients, global_step=global_step)
-
 
     if FLAGS.early_stop is True and not FLAGS.validation_step > 0:
         log_warn('Parameter --validation_step needs to be >0 for early stopping to work')
