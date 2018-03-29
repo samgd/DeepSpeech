@@ -673,7 +673,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     the decoded result and the batch's original Y.
     '''
     # Obtain the next batch of data
-    batch_x, batch_seq_len, batch_y, flat_labels, labels_len = model_feeder.next_batch(tower)
+    batch_x, batch_seq_len, batch_y, flat_labels, labels_len, batch_size = model_feeder.next_batch(tower)
 
     if FLAGS.log_level == 0:
         batch_seq_len = tf.Print(batch_seq_len,
@@ -704,8 +704,8 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     else:
         total_loss = tf.nn.ctc_loss(labels=batch_y, inputs=logits, sequence_length=batch_seq_len)
 
-    # Calculate the summed loss across the batch
-    sum_loss = tf.reduce_sum(total_loss)
+    # Calculate the mean loss across the batch
+    avg_loss = tf.reduce_mean(total_loss)
 
     # Beam search decode the batch
     decoded, _ = decode_with_lm(logits, batch_seq_len, merge_repeated=False, beam_width=FLAGS.beam_width)
@@ -723,7 +723,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     # - the recognition mean edit distance,
     # - the decoded batch and
     # - the original batch_y (which contains the verified transcriptions).
-    return total_loss, sum_loss, distance, mean_edit_distance, decoded, batch_y
+    return total_loss, avg_loss, distance, mean_edit_distance, decoded, batch_y, batch_size
 
 
 # Adam Optimization
@@ -735,8 +735,8 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
 # (www.cs.toronto.edu/~fritz/absps/momentum.pdf) was used,
 # we will use the Adam method for optimization (http://arxiv.org/abs/1412.6980),
 # because, generally, it requires less fine-tuning.
-def create_optimizer():
-    optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.target_learning_rate,
+def create_optimizer(learning_rate):
+    optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate,
                                        beta1=FLAGS.beta1,
                                        beta2=FLAGS.beta2,
                                        epsilon=FLAGS.epsilon)
@@ -759,7 +759,7 @@ def create_optimizer():
 # on which all operations within the tower execute.
 # For example, all operations of 'tower 0' could execute on the first GPU `tf.device('/gpu:0')`.
 
-def get_tower_results(model_feeder, optimizer, is_training):
+def get_tower_results(model_feeder, is_training):
     r'''
     With this preliminary step out of the way, we can for each GPU introduce a
     tower for which's batch we calculate
@@ -798,15 +798,15 @@ def get_tower_results(model_feeder, optimizer, is_training):
     # To calculate the mean of the mean edit distances
     tower_mean_edit_distances = []
 
-    # To calculate the sum of the losses
-    tower_sum_losses = []
+    # To calculate the avg of the losses
+    tower_avg_losses = []
 
-    # Compute dropout Tesnors if any
-    dropout_param = no_dropout
-    if optimizer is not None:
-        dropout_param = ph_dropout
-        for do in dropout_param:
-            tf.summary.scalar(do.name, do)
+    tower_avg_batch_size = []
+
+    # Compute dropout Tensors if any
+    dropout_param = ph_dropout
+    for do in dropout_param:
+        tf.summary.scalar(do.name, do)
 
     with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
         # Loop over available_devices
@@ -819,9 +819,9 @@ def get_tower_results(model_feeder, optimizer, is_training):
             with tf.device(device):
                 # Create a scope for all operations of tower i
                 with tf.name_scope('tower_%d' % i) as scope:
-                    # Calculate the sum_loss and mean_edit_distance and retrieve the decoded
+                    # Calculate the avg_loss and mean_edit_distance and retrieve the decoded
                     # batch along with the original batch's labels (Y) of this tower
-                    total_loss, sum_loss, distance, mean_edit_distance, decoded, labels = \
+                    total_loss, avg_loss, distance, mean_edit_distance, decoded, labels, batch_size = \
                         calculate_mean_edit_distance_and_loss(model_feeder, i, dropout_param, is_training)
 
                     # Allow for variables to be re-used by the next tower
@@ -841,21 +841,26 @@ def get_tower_results(model_feeder, optimizer, is_training):
 
                     # Compute gradients for model parameters using tower's mini-batch
                     # Apply loss-scaling to improve numerical stability
-                    gradients = optimizer.compute_gradients(FLAGS.loss_scale * sum_loss)
+                    trainable_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+                    gradients = tf.gradients(xs=trainable_vars,
+                                             ys=FLAGS.loss_scale * avg_loss)
                     # Retain tower's gradients
-                    tower_gradients.append(gradients)
+                    tower_gradients.append(list(zip(gradients, trainable_vars)))
 
                     # Retain tower's mean edit distance
                     tower_mean_edit_distances.append(mean_edit_distance)
 
                     # Retain tower's summed losses
-                    tower_sum_losses.append(sum_loss)
+                    tower_avg_losses.append(avg_loss)
+
+                    tower_avg_batch_size.append(batch_size)
 
     # Return the results tuple, the gradients, and the means of mean edit distances and losses
     return (tower_labels, tower_decodings, tower_distances, tower_total_losses), \
            tower_gradients, \
            tf.reduce_mean(tower_mean_edit_distances, 0), \
-           tf.reduce_mean(tower_sum_losses, 0)
+           tf.reduce_mean(tower_avg_losses, 0), \
+           tf.reduce_mean(tower_avg_batch_size, 0)
 
 
 def average_gradients(tower_gradients):
@@ -1092,6 +1097,7 @@ class WorkerJob(object):
         self.mean_edit_distance = -1
         self.wer = -1
         self.samples = []
+        self.sample_losses = []
 
     def __str__(self):
         return 'Job (ID: %d, worker: %d, epoch: %d, set_name: %s)' % (self.id, self.worker, self.index, self.set_name)
@@ -1190,16 +1196,18 @@ class Epoch(object):
                 agg_loss = 0.0
                 agg_wer = 0.0
                 agg_mean_edit_distance = 0.0
+                n_samples = 0.0
 
                 for i in range(num_jobs):
                     job = jobs.pop(0)
-                    agg_loss += job.loss
+                    agg_loss += sum(job.sample_losses)
+                    n_samples += len(job.sample_losses)
                     if self.report:
                         agg_wer += job.wer
                         agg_mean_edit_distance += job.mean_edit_distance
                         self.samples.extend(job.samples)
 
-                self.loss = agg_loss / num_jobs
+                self.loss = agg_loss / n_samples
 
                 # if the job was for validation dataset then append it to the COORD's _loss for early stop verification
                 if (FLAGS.early_stop is True) and (self.set_name == 'dev'):
@@ -1729,19 +1737,20 @@ def train(server=None):
                                dtype=precision,
                                logdir=FLAGS.summary_dir)
 
+    is_training = tf.placeholder(tf.bool, shape=[], name='is_training')
+
+    # Get the data_set specific graph end-points
+    results_tuple, gradients, mean_edit_distance, loss, batch_size = get_tower_results(model_feeder, is_training)
+
     # Create the optimizer
-    optimizer = create_optimizer()
+    learning_rate = tf.constant(FLAGS.target_learning_rate) * tf.cast(batch_size, tf.float32)
+    optimizer = create_optimizer(learning_rate)
 
     # Synchronous distributed training is facilitated by a special proxy-optimizer
     if not server is None:
         optimizer = tf.train.SyncReplicasOptimizer(optimizer,
                                                    replicas_to_aggregate=FLAGS.replicas_to_agg,
                                                    total_num_replicas=FLAGS.replicas)
-
-    is_training = tf.placeholder(tf.bool, shape=[], name='is_training')
-
-    # Get the data_set specific graph end-points
-    results_tuple, gradients, mean_edit_distance, loss = get_tower_results(model_feeder, optimizer, is_training)
 
     # Average tower gradients across GPUs
     avg_tower_gradients = average_gradients(gradients)
@@ -1757,11 +1766,10 @@ def train(server=None):
 
         pruning_hparams.threshold_decay = 0.0
      
-        pruning_hparams.end_pruning_step = -1 #FLAGS.end_pruning_epoch * model_feeder.train.total_batches
+        pruning_hparams.end_pruning_step = FLAGS.end_pruning_epoch * model_feeder.train.total_batches
         if pruning_hparams.end_pruning_step == 0:
             pruning_hparams.end_pruning_step = FLAGS.epoch * model_feeder.train.total_batches
-        
-        pruning_hparams.sparsity_function_end_step = FLAGS.end_pruning_epoch * model_feeder.train.total_batches
+        pruning_hparams.sparsity_function_end_step = pruning_hparams.end_pruning_step
     
         pruning_hparams.pruning_frequency = FLAGS.pruning_frequency
         pruning_hparams.target_sparsity = FLAGS.target_sparsity
@@ -1939,8 +1947,10 @@ def train(server=None):
                     # So far the only extra parameter is the feed_dict
                     if job.set_name == 'train':
                         feed_dict.update(zip(ph_dropout, train_dropout_rates))
+                        run_update_mask = mask_update_op
                     else:
                         feed_dict.update(zip(ph_dropout, no_dropout))
+                        run_update_mask = []
                     extra_params = { 'feed_dict': feed_dict }
 
                     # Loop over the batches
@@ -1952,14 +1962,16 @@ def train(server=None):
 
                         log_debug('Starting batch...')
                         # Compute the batch
-                        _, current_step, batch_loss, batch_report, _, loss_sum, job_do_scale = session.run([train_op,
-                                                                                                            global_step,
-                                                                                                            loss,
-                                                                                                            report_params,
-                                                                                                            mask_update_op,
-                                                                                                            loss_summary_op,
-                                                                                                            dropout_scale],
-                                                                                                            **extra_params)
+                        _, current_step, batch_loss, batch_report, _, loss_sum, job_do_scale, sample_losses, nz_perc = session.run([train_op,
+                                                                                                                                    global_step,
+                                                                                                                                    loss,
+                                                                                                                                    report_params,
+                                                                                                                                    run_update_mask,
+                                                                                                                                    loss_summary_op,
+                                                                                                                                    dropout_scale,
+                                                                                                                                    results_tuple[3],
+                                                                                                                                    nonzero],
+                                                                                                                                    **extra_params)
 
                         for i in range(len(train_dropout_rates)):
                             train_dropout_rates[i] = dropout_rates[i] * job_do_scale
@@ -1969,7 +1981,7 @@ def train(server=None):
                         #pctx.profiler.profile_operations(options=opts)
 
                         # Uncomment the next line for debugging race conditions / distributed TF
-                        log_debug('Finished %s batch step %d - loss: %f.' % (job.set_name, current_step, batch_loss))
+                        log_debug('Finished %s batch step %d - loss: %f - nonzero: %f.' % (job.set_name, current_step, batch_loss, nz_perc))
 
                         # Add batch to loss
                         total_loss += batch_loss
@@ -1980,11 +1992,10 @@ def train(server=None):
                             # Add batch to total_mean_edit_distance
                             total_mean_edit_distance += batch_report[1]
 
+                        job.sample_losses.extend([s for tower in sample_losses for s in tower])
+
                     # Gathering job results
                     job.loss = total_loss / job.steps
-                    if train_loss_writer and job.set_name == 'dev':
-                        dev_summary = tf.Summary(value=[tf.Summary.Value(tag='dev_loss', simple_value=job.loss)])
-                        train_loss_writer.add_summary(dev_summary, current_step)
 
                     if job.report and FLAGS.report_wer:
                         job.mean_edit_distance = total_mean_edit_distance / job.steps
