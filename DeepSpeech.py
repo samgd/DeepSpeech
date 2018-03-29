@@ -1114,12 +1114,13 @@ class Epoch(object):
         set_name (str): the name of the data-set - one of 'train', 'dev', 'test'
         report (bool): if this job should produce a WER report
     '''
-    def __init__(self, index, num_jobs, set_name='train', report=False):
+    def __init__(self, index, num_jobs, set_name='train', report=False, writer=None):
         self.id = new_id()
         self.index = index
         self.num_jobs = num_jobs
         self.set_name = set_name
         self.report = report
+        self._writer = writer
         self.wer = -1
         self.loss = -1
         self.mean_edit_distance = -1
@@ -1208,6 +1209,10 @@ class Epoch(object):
                         self.samples.extend(job.samples)
 
                 self.loss = agg_loss / n_samples
+
+                if self._writer is not None:
+                    summary = tf.Summary(value=[tf.Summary.Value(tag=self.set_name + '_epoch_loss', simple_value=self.loss)])
+                    self._writer.add_summary(summary)
 
                 # if the job was for validation dataset then append it to the COORD's _loss for early stop verification
                 if (FLAGS.early_stop is True) and (self.set_name == 'dev'):
@@ -1360,7 +1365,7 @@ class TrainingCoordinator(object):
         for epoch in self._epochs_running:
             log_debug('       - running: ' + epoch.job_status())
 
-    def start_coordination(self, model_feeder, coord, session, step=0):
+    def start_coordination(self, model_feeder, coord, session, step=0, writer=None):
         '''Starts to coordinate epochs and jobs among workers on base of
         data-set sizes, the (global) step and FLAGS parameters.
 
@@ -1375,6 +1380,7 @@ class TrainingCoordinator(object):
             self._model_feeder = model_feeder
             self._coord = coord
             self._session = session
+            self._writer = writer
 
             # Number of GPUs per worker - fixed for now by local reality or cluster setup
             gpus_per_worker = len(available_devices)
@@ -1471,11 +1477,11 @@ class TrainingCoordinator(object):
                 # If the training part of the current epoch should generate a WER report
                 is_display_step = FLAGS.display_step > 0 and (FLAGS.display_step == 1 or self._epoch > 0) and (self._epoch % FLAGS.display_step == 0 or self._epoch == self._target_epoch)
                 # Append the training epoch
-                self._epochs_running.append(Epoch(self._epoch, num_jobs_train, set_name='train', report=is_display_step))
+                self._epochs_running.append(Epoch(self._epoch, num_jobs_train, set_name='train', report=is_display_step, writer=self._writer))
 
                 if FLAGS.validation_step > 0 and (FLAGS.validation_step == 1 or self._epoch > 0) and self._epoch % FLAGS.validation_step == 0:
                     # The current epoch should also have a validation part
-                    self._epochs_running.append(Epoch(self._epoch, self._num_jobs_dev, set_name='dev', report=is_display_step))
+                    self._epochs_running.append(Epoch(self._epoch, self._num_jobs_dev, set_name='dev', report=is_display_step, writer=self._writer))
 
 
                 # Indicating that there were 'new' epoch(s) provided
@@ -1820,7 +1826,7 @@ def train(server=None):
     # Hook to save TensorBoard summaries
     if FLAGS.summary_steps > 0:
         hooks.append(tf.train.SummarySaverHook(save_steps=FLAGS.summary_steps, output_dir=FLAGS.summary_dir, summary_op=merge_all_summaries_op))
-        train_loss_summary = tf.summary.scalar('train_loss', loss, collections=[])
+        train_loss_summary = tf.summary.scalar('train_batch_loss', loss, collections=[])
         train_loss_writer = tf.summary.FileWriter(os.path.join(FLAGS.summary_dir, 'loss'))
     else:
         train_loss_summary = []
@@ -1910,7 +1916,7 @@ def train(server=None):
                     # Retrieving global_step from the (potentially restored) model
                     step = get_session(session).run(global_step)
                     coord = tf.train.Coordinator()
-                    COORD.start_coordination(model_feeder, coord, get_session(session), step)
+                    COORD.start_coordination(model_feeder, coord, get_session(session), step, writer=train_loss_writer)
 
                 # Get the first job
                 job = COORD.get_job()
