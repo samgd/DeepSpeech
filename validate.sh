@@ -29,7 +29,7 @@ python -u DeepSpeech.py \
   --dev_files "$COMPUTE_DATA_DIR/librivox-dev-clean.csv" \
   --test_files "$COMPUTE_DATA_DIR/librivox-dev-clean.csv" \
   --notrain \
-  --gpu_batch_size 128 \
+  --gpu_batch_size 64 \
   --max_seq_len 850 \
   --n_hidden 2048 \
   --lstm_type cudnn \

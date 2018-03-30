@@ -1217,6 +1217,7 @@ class Epoch(object):
 
                 total_leven = 0.0
                 total_lab_len = 0.0
+                print('\n\n %d \n\n' % len(self.samples))
                 for sample in self.samples:
                     total_leven += sample.levenhstein
                     total_lab_len += sample.label_length
@@ -1866,11 +1867,14 @@ def train(server=None):
         assign_ops = []
         init_from_ckpt_dict = {}
         for name, restored_tensor in var_names_to_values.items():
-            training_tensor = training_graph.get_tensor_by_name(name + ':0')
-            placehold = tf.placeholder(restored_tensor.dtype,
-                                       shape=restored_tensor.shape)
-            init_from_ckpt_dict[placehold] = restored_tensor
-            assign_ops.append(tf.assign(training_tensor, placehold))
+            try:
+                training_tensor = training_graph.get_tensor_by_name(name + ':0')
+                placehold = tf.placeholder(restored_tensor.dtype,
+                                           shape=restored_tensor.shape)
+                init_from_ckpt_dict[placehold] = restored_tensor
+                assign_ops.append(tf.assign(training_tensor, placehold))
+            except KeyError:
+                log_warn('%s not found in graph when restoring checkpoint' % name)
 
         init_from_checkpoint_op = tf.group(*assign_ops)
         log_info('restoring variables from checkpoint: %s' % var_names_to_values.keys())
