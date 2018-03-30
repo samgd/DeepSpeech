@@ -8,6 +8,7 @@ import sys
 log_level_index = sys.argv.index('--log_level') + 1 if '--log_level' in sys.argv else 0
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'#sys.argv[log_level_index] if log_level_index > 0 and log_level_index < len(sys.argv) else '3'
 
+import copy
 import datetime
 import pickle
 import shutil
@@ -19,9 +20,11 @@ import inspect
 
 from six.moves import zip, range, filter, urllib, BaseHTTPServer
 from tensorflow.contrib.cudnn_rnn.ops import gen_cudnn_rnn_ops
+from tensorflow.contrib.framework import assign_from_values
 from tensorflow.contrib.session_bundle import exporter
 from tensorflow.python.tools import freeze_graph
 from threading import Thread, Lock
+from util.convert_params import get_tensors
 from util.npy_audio import audiofile_to_input_vector
 from util.feeding import DataSet, ModelFeeder
 from util.gpu import get_available_gpus
@@ -85,7 +88,8 @@ tf.app.flags.DEFINE_float   ('target_learning_rate',    0.001,       'learning r
 
 # Batch sizes
 
-tf.app.flags.DEFINE_integer ('target_batch_size', 1,          'number of elements in a training batch')
+tf.app.flags.DEFINE_integer ('target_batch_size', 1,          'desired number of elements in a training batch')
+tf.app.flags.DEFINE_integer ('gpu_batch_size',    1,          'actual number of elements in a training batch')
 tf.app.flags.DEFINE_integer ('max_seq_len',       925,        'maximum sequence length to achieve target batch size')
 
 # Sample limits
@@ -94,9 +98,15 @@ tf.app.flags.DEFINE_integer ('limit_train',      0,           'maximum number of
 tf.app.flags.DEFINE_integer ('limit_dev',        0,           'maximum number of elements to use from validation set- 0 means no limit')
 tf.app.flags.DEFINE_integer ('limit_test',       0,           'maximum number of elements to use from test set- 0 means no limit')
 
+# Shuffle
+
+tf.app.flags.DEFINE_boolean ('shuffle_train',       True,       'shuffle dataset after first epoch')
+tf.app.flags.DEFINE_boolean ('shuffle_first_epoch', False,      'shuffle first epoch if shuffle_train is True')
+
 # Sparsity
 
 tf.app.flags.DEFINE_boolean ('update_masks',          False,    'update binary masks if apply_masks is true')
+tf.app.flags.DEFINE_boolean ('apply_mask',            False,    'load and apply binary masks to the trainable variables.')
 tf.app.flags.DEFINE_integer ('begin_pruning_epoch',   0,        'the epoch at which to begin pruning')
 tf.app.flags.DEFINE_integer ('end_pruning_epoch',     0,        'the epoch at which to terminate pruning - 0 means use epoch')
 tf.app.flags.DEFINE_integer ('pruning_frequency',     50,       'steps per mask update')
@@ -141,10 +151,6 @@ tf.app.flags.DEFINE_integer ('n_hidden',         2048,        'layer width to us
 # LSTM Implementation
 
 tf.app.flags.DEFINE_string  ('lstm_type',        'basic',     'LSTM implementation to use')
-
-# Masking
-
-tf.app.flags.DEFINE_boolean ('apply_mask',       False,       'load and apply binary masks to the trainable variables.')
 
 # Initialization
 
@@ -258,6 +264,14 @@ def initialize_globals():
 
     if FLAGS.half_precision and FLAGS.loss_scale == 1.0:
         log_warn('Parameter --loss_scale is 1 when using --half_precision')
+
+    global ph_dropout
+    ph_dropout = [ tf.placeholder(precision, shape=[], name='dropout_rate'),
+                   tf.placeholder(precision, shape=[], name='dropout_rate2'),
+                   tf.placeholder(precision, shape=[], name='dropout_rate3'),
+                   tf.placeholder(precision, shape=[], name='dropout_rate4'),
+                   tf.placeholder(precision, shape=[], name='dropout_rate5'),
+                   tf.placeholder(precision, shape=[], name='dropout_rate6') ]
 
     # Set default checkpoint dir
     if len(FLAGS.checkpoint_dir) == 0:
@@ -692,7 +706,7 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
     else:
         total_loss = tf.nn.ctc_loss(labels=batch_y, inputs=logits, sequence_length=batch_seq_len)
 
-    # Calculate the summed loss across the batch
+    # Calculate the sum loss across the batch
     sum_loss = tf.reduce_sum(total_loss)
 
     # Beam search decode the batch
@@ -723,8 +737,8 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
 # (www.cs.toronto.edu/~fritz/absps/momentum.pdf) was used,
 # we will use the Adam method for optimization (http://arxiv.org/abs/1412.6980),
 # because, generally, it requires less fine-tuning.
-def create_optimizer():
-    optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.target_learning_rate,
+def create_optimizer(learning_rate):
+    optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate,
                                        beta1=FLAGS.beta1,
                                        beta2=FLAGS.beta2,
                                        epsilon=FLAGS.epsilon)
@@ -747,7 +761,7 @@ def create_optimizer():
 # on which all operations within the tower execute.
 # For example, all operations of 'tower 0' could execute on the first GPU `tf.device('/gpu:0')`.
 
-def get_tower_results(model_feeder, optimizer, is_training):
+def get_tower_results(model_feeder, is_training):
     r'''
     With this preliminary step out of the way, we can for each GPU introduce a
     tower for which's batch we calculate
@@ -786,8 +800,13 @@ def get_tower_results(model_feeder, optimizer, is_training):
     # To calculate the mean of the mean edit distances
     tower_mean_edit_distances = []
 
-    # To calculate the sum of the losses
+    # To calculate the avg of the losses
     tower_sum_losses = []
+
+    # Compute dropout Tensors if any
+    dropout_param = ph_dropout
+    for do in dropout_param:
+        tf.summary.scalar(do.name, do)
 
     with tf.variable_scope(tf.get_variable_scope(), reuse=tf.AUTO_REUSE):
         # Loop over available_devices
@@ -800,10 +819,10 @@ def get_tower_results(model_feeder, optimizer, is_training):
             with tf.device(device):
                 # Create a scope for all operations of tower i
                 with tf.name_scope('tower_%d' % i) as scope:
-                    # Calculate the sum_loss and mean_edit_distance and retrieve the decoded
+                    # Calculate the avg_loss and mean_edit_distance and retrieve the decoded
                     # batch along with the original batch's labels (Y) of this tower
                     total_loss, sum_loss, distance, mean_edit_distance, decoded, labels = \
-                        calculate_mean_edit_distance_and_loss(model_feeder, i, no_dropout if optimizer is None else dropout_rates, is_training)
+                        calculate_mean_edit_distance_and_loss(model_feeder, i, dropout_param, is_training)
 
                     # Allow for variables to be re-used by the next tower
                     tf.get_variable_scope().reuse_variables()
@@ -822,9 +841,11 @@ def get_tower_results(model_feeder, optimizer, is_training):
 
                     # Compute gradients for model parameters using tower's mini-batch
                     # Apply loss-scaling to improve numerical stability
-                    gradients = optimizer.compute_gradients(FLAGS.loss_scale * sum_loss)
+                    trainable_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
+                    gradients = tf.gradients(xs=trainable_vars,
+                                             ys=FLAGS.loss_scale * (sum_loss / model_feeder.train.mean_batch_size))
                     # Retain tower's gradients
-                    tower_gradients.append(gradients)
+                    tower_gradients.append(list(zip(gradients, trainable_vars)))
 
                     # Retain tower's mean edit distance
                     tower_mean_edit_distances.append(mean_edit_distance)
@@ -836,7 +857,7 @@ def get_tower_results(model_feeder, optimizer, is_training):
     return (tower_labels, tower_decodings, tower_distances, tower_total_losses), \
            tower_gradients, \
            tf.reduce_mean(tower_mean_edit_distances, 0), \
-           tf.reduce_mean(tower_sum_losses, 0)
+           tf.reduce_mean(tower_sum_losses, 0), \
 
 
 def average_gradients(tower_gradients):
@@ -921,11 +942,13 @@ def calculate_report(results_tuple):
     total_levenshtein = 0.0
     total_label_length = 0.0
     for label, decoding, distance, loss in items:
-        sample_wer = wer(label, decoding)
-        sample = Sample(label, decoding, loss, distance, sample_wer)
+        sample_leven = levenshtein(label.split(), decoding.split())
+        lab_len = float(len(label.split()))
+        sample_wer = float(sample_leven) / lab_len
+        sample = Sample(label, decoding, loss, distance, sample_wer, sample_leven, lab_len)
         samples.append(sample)
-        total_levenshtein += levenshtein(label.split(), decoding.split())
-        total_label_length += float(len(label.split()))
+        total_levenshtein += sample_leven
+        total_label_length += lab_len
 
     # Getting the WER from the accumulated levenshteins and lengths
     samples_wer = total_levenshtein / total_label_length
@@ -1029,7 +1052,7 @@ def new_id():
     return id_counter
 
 class Sample(object):
-    def __init__(self, src, res, loss, mean_edit_distance, sample_wer):
+    def __init__(self, src, res, loss, mean_edit_distance, sample_wer, levenhstein, label_length):
         '''Represents one item of a WER report.
 
         Args:
@@ -1043,6 +1066,8 @@ class Sample(object):
         self.loss = loss
         self.mean_edit_distance = mean_edit_distance
         self.wer = sample_wer
+        self.levenhstein = levenhstein
+        self.label_length = label_length
 
     def __str__(self):
         return 'WER: %f, loss: %f, mean edit distance: %f\n - src: "%s"\n - res: "%s"' % (self.wer, self.loss, self.mean_edit_distance, self.src, self.res)
@@ -1069,6 +1094,7 @@ class WorkerJob(object):
         self.mean_edit_distance = -1
         self.wer = -1
         self.samples = []
+        self.sample_losses = []
 
     def __str__(self):
         return 'Job (ID: %d, worker: %d, epoch: %d, set_name: %s)' % (self.id, self.worker, self.index, self.set_name)
@@ -1085,12 +1111,13 @@ class Epoch(object):
         set_name (str): the name of the data-set - one of 'train', 'dev', 'test'
         report (bool): if this job should produce a WER report
     '''
-    def __init__(self, index, num_jobs, set_name='train', report=False):
+    def __init__(self, index, num_jobs, set_name='train', report=False, writer=None):
         self.id = new_id()
         self.index = index
         self.num_jobs = num_jobs
         self.set_name = set_name
         self.report = report
+        self._writer = writer
         self.wer = -1
         self.loss = -1
         self.mean_edit_distance = -1
@@ -1167,23 +1194,35 @@ class Epoch(object):
                 agg_loss = 0.0
                 agg_wer = 0.0
                 agg_mean_edit_distance = 0.0
+                n_samples = 0.0
 
                 for i in range(num_jobs):
                     job = jobs.pop(0)
-                    agg_loss += job.loss
+                    agg_loss += sum(job.sample_losses)
+                    n_samples += len(job.sample_losses)
                     if self.report:
                         agg_wer += job.wer
                         agg_mean_edit_distance += job.mean_edit_distance
                         self.samples.extend(job.samples)
 
-                self.loss = agg_loss / num_jobs
+                self.loss = agg_loss / n_samples
+
+                if self._writer is not None:
+                    summary = tf.Summary(value=[tf.Summary.Value(tag=self.set_name + '_epoch_loss', simple_value=self.loss)])
+                    self._writer.add_summary(summary)
 
                 # if the job was for validation dataset then append it to the COORD's _loss for early stop verification
                 if (FLAGS.early_stop is True) and (self.set_name == 'dev'):
                     COORD._dev_losses.append(self.loss)
 
+                total_leven = 0.0
+                total_lab_len = 0.0
+                for sample in self.samples:
+                    total_leven += sample.levenhstein
+                    total_lab_len += sample.label_length
+
                 if self.report and FLAGS.report_wer:
-                    self.wer = agg_wer / num_jobs
+                    self.wer = total_leven / total_lab_len
                     self.mean_edit_distance = agg_mean_edit_distance / num_jobs
 
                     # Order samles by their loss (lowest loss on top)
@@ -1323,7 +1362,7 @@ class TrainingCoordinator(object):
         for epoch in self._epochs_running:
             log_debug('       - running: ' + epoch.job_status())
 
-    def start_coordination(self, model_feeder, coord, session, step=0):
+    def start_coordination(self, model_feeder, coord, session, step=0, writer=None):
         '''Starts to coordinate epochs and jobs among workers on base of
         data-set sizes, the (global) step and FLAGS parameters.
 
@@ -1338,6 +1377,7 @@ class TrainingCoordinator(object):
             self._model_feeder = model_feeder
             self._coord = coord
             self._session = session
+            self._writer = writer
 
             # Number of GPUs per worker - fixed for now by local reality or cluster setup
             gpus_per_worker = len(available_devices)
@@ -1434,11 +1474,11 @@ class TrainingCoordinator(object):
                 # If the training part of the current epoch should generate a WER report
                 is_display_step = FLAGS.display_step > 0 and (FLAGS.display_step == 1 or self._epoch > 0) and (self._epoch % FLAGS.display_step == 0 or self._epoch == self._target_epoch)
                 # Append the training epoch
-                self._epochs_running.append(Epoch(self._epoch, num_jobs_train, set_name='train', report=is_display_step))
+                self._epochs_running.append(Epoch(self._epoch, num_jobs_train, set_name='train', report=is_display_step, writer=self._writer))
 
                 if FLAGS.validation_step > 0 and (FLAGS.validation_step == 1 or self._epoch > 0) and self._epoch % FLAGS.validation_step == 0:
                     # The current epoch should also have a validation part
-                    self._epochs_running.append(Epoch(self._epoch, self._num_jobs_dev, set_name='dev', report=is_display_step))
+                    self._epochs_running.append(Epoch(self._epoch, self._num_jobs_dev, set_name='dev', report=is_display_step, writer=self._writer))
 
 
                 # Indicating that there were 'new' epoch(s) provided
@@ -1639,6 +1679,12 @@ def send_token_to_ps(session, kill=False):
         session.run(enqueue, feed_dict={ token_placeholder: token })
         log_debug('Sent %s token to ps %d.' % (kind, index))
 
+def nonzero_percent():
+    if not FLAGS.apply_mask:
+        return tf.constant(1.0)
+    nonzero = 1.0 - cudnn_pruning.get_weight_sparsity()
+    return nonzero
+
 def train(server=None):
     r'''
     Trains the network on a given server of a cluster.
@@ -1660,16 +1706,17 @@ def train(server=None):
     # Reading training set
     train_set = DataSet('train',
                         FLAGS.train_files.split(','),
-                        FLAGS.target_batch_size,
+                        FLAGS.gpu_batch_size,
                         FLAGS.max_seq_len,
                         limit=FLAGS.limit_train,
                         next_index=lambda i: COORD.get_next_index('train'),
-                        shuffle_batch_order=True)
+                        shuffle_batch_order=FLAGS.shuffle_train,
+                        shuffle_first_iteration=FLAGS.shuffle_first_epoch)
 
     # Reading validation set
     dev_set = DataSet('dev',
                       FLAGS.dev_files.split(','),
-                      FLAGS.target_batch_size,
+                      FLAGS.gpu_batch_size,
                       FLAGS.max_seq_len,
                       limit=FLAGS.limit_dev,
                       next_index=lambda i: COORD.get_next_index('dev'))
@@ -1677,7 +1724,7 @@ def train(server=None):
     # Reading test set
     test_set = DataSet('test',
                        FLAGS.test_files.split(','),
-                       FLAGS.target_batch_size,
+                       FLAGS.gpu_batch_size,
                        FLAGS.max_seq_len,
                        limit=FLAGS.limit_test,
                        next_index=lambda i: COORD.get_next_index('test'))
@@ -1693,19 +1740,22 @@ def train(server=None):
                                dtype=precision,
                                logdir=FLAGS.summary_dir)
 
+    is_training = tf.placeholder(tf.bool, shape=[], name='is_training')
+
+    # Get the data_set specific graph end-points
+    results_tuple, gradients, mean_edit_distance, loss = get_tower_results(model_feeder, is_training)
+
     # Create the optimizer
-    optimizer = create_optimizer()
+    alpha = model_feeder.train.mean_batch_size / FLAGS.target_batch_size
+    log_info('learning rate alpha scale: %f' % alpha)
+    learning_rate = FLAGS.target_learning_rate * alpha
+    optimizer = create_optimizer(learning_rate)
 
     # Synchronous distributed training is facilitated by a special proxy-optimizer
     if not server is None:
         optimizer = tf.train.SyncReplicasOptimizer(optimizer,
                                                    replicas_to_aggregate=FLAGS.replicas_to_agg,
                                                    total_num_replicas=FLAGS.replicas)
-
-    is_training = tf.placeholder(tf.bool, shape=[], name='is_training')
-
-    # Get the data_set specific graph end-points
-    results_tuple, gradients, mean_edit_distance, loss = get_tower_results(model_feeder, optimizer, is_training)
 
     # Average tower gradients across GPUs
     avg_tower_gradients = average_gradients(gradients)
@@ -1719,6 +1769,8 @@ def train(server=None):
         pruning_hparams = cudnn_pruning.get_pruning_hparams()
         pruning_hparams.begin_pruning_step = FLAGS.begin_pruning_epoch * model_feeder.train.total_batches
         pruning_hparams.sparsity_function_begin_step = pruning_hparams.begin_pruning_step
+
+        pruning_hparams.threshold_decay = 0.0
      
         pruning_hparams.end_pruning_step = FLAGS.end_pruning_epoch * model_feeder.train.total_batches
         if pruning_hparams.end_pruning_step == 0:
@@ -1733,13 +1785,18 @@ def train(server=None):
         p.add_pruning_summaries()
     else:
        mask_update_op = []
+
+    # Droput scaling parameter
+    nonzero = nonzero_percent()
+    tf.summary.scalar('nonzero_percent', nonzero)
+    dropout_scale = tf.sqrt(nonzero)
+    train_dropout_rates = copy.copy(dropout_rates)
     
     # Op to merge all summaries for the summary hook
     merge_all_summaries_op = tf.summary.merge_all()
 
     # Apply gradients to modify the model
     apply_gradient_op = optimizer.apply_gradients(avg_tower_gradients, global_step=global_step)
-
 
     if FLAGS.early_stop is True and not FLAGS.validation_step > 0:
         log_warn('Parameter --validation_step needs to be >0 for early stopping to work')
@@ -1768,6 +1825,11 @@ def train(server=None):
     # Hook to save TensorBoard summaries
     if FLAGS.summary_steps > 0:
         hooks.append(tf.train.SummarySaverHook(save_steps=FLAGS.summary_steps, output_dir=FLAGS.summary_dir, summary_op=merge_all_summaries_op))
+        train_loss_summary = tf.summary.scalar('train_batch_loss', loss, collections=[])
+        train_loss_writer = tf.summary.FileWriter(os.path.join(FLAGS.summary_dir, 'loss'))
+    else:
+        train_loss_summary = []
+        train_loss_writer = None
 
     # Hook to save checkpoint after each epoch
     saver = tf.train.Saver(max_to_keep=FLAGS.max_to_keep)
@@ -1795,6 +1857,23 @@ def train(server=None):
             assign_ops.append(tf.assign(training_tensor, restored_tensor))
 
         init_from_frozen_model_op = tf.group(*assign_ops)
+
+    if len(FLAGS.initialize_from_checkpoint) > 0:
+        var_names_to_values = get_tensors(FLAGS.initialize_from_checkpoint)
+
+        training_graph = tf.get_default_graph()
+
+        assign_ops = []
+        init_from_ckpt_dict = {}
+        for name, restored_tensor in var_names_to_values.items():
+            training_tensor = training_graph.get_tensor_by_name(name + ':0')
+            placehold = tf.placeholder(restored_tensor.dtype,
+                                       shape=restored_tensor.shape)
+            init_from_ckpt_dict[placehold] = restored_tensor
+            assign_ops.append(tf.assign(training_tensor, placehold))
+
+        init_from_checkpoint_op = tf.group(*assign_ops)
+        log_info('restoring variables from checkpoint: %s' % var_names_to_values.keys())
 
     def get_session(sess):
         session = sess
@@ -1829,14 +1908,14 @@ def train(server=None):
                 log_info('Initializing from checkpoint: {}'.format(FLAGS.initialize_from_checkpoint))
                 if len(FLAGS.initialize_from_frozen_model) > 0:
                     log_warn('Frozen model initialization will be overwritten.')
-                saver.restore(get_session(session), FLAGS.initialize_from_checkpoint)
+                get_session(session).run(init_from_checkpoint_op, init_from_ckpt_dict)
 
             try:
                 if is_chief:
                     # Retrieving global_step from the (potentially restored) model
                     step = get_session(session).run(global_step)
                     coord = tf.train.Coordinator()
-                    COORD.start_coordination(model_feeder, coord, get_session(session), step)
+                    COORD.start_coordination(model_feeder, coord, get_session(session), step, writer=train_loss_writer)
 
                 # Get the first job
                 job = COORD.get_job()
@@ -1868,7 +1947,15 @@ def train(server=None):
                     else:
                         report_params = []
 
+                    loss_summary_op = train_loss_summary if job.set_name == 'train' else []
+
                     # So far the only extra parameter is the feed_dict
+                    if job.set_name == 'train':
+                        feed_dict.update(zip(ph_dropout, train_dropout_rates))
+                        run_update_mask = mask_update_op
+                    else:
+                        feed_dict.update(zip(ph_dropout, no_dropout))
+                        run_update_mask = []
                     extra_params = { 'feed_dict': feed_dict }
 
                     # Loop over the batches
@@ -1880,11 +1967,26 @@ def train(server=None):
 
                         log_debug('Starting batch...')
                         # Compute the batch
-                        _, current_step, batch_loss, batch_report, _ = session.run([train_op, global_step, loss, report_params, mask_update_op], **extra_params)
+                        _, current_step, batch_loss, batch_report, _, loss_sum, job_do_scale, sample_losses, nz_perc = session.run([train_op,
+                                                                                                                                    global_step,
+                                                                                                                                    loss,
+                                                                                                                                    report_params,
+                                                                                                                                    run_update_mask,
+                                                                                                                                    loss_summary_op,
+                                                                                                                                    dropout_scale,
+                                                                                                                                    results_tuple[3],
+                                                                                                                                    nonzero],
+                                                                                                                                    **extra_params)
+
+                        for i in range(len(train_dropout_rates)):
+                            train_dropout_rates[i] = dropout_rates[i] * job_do_scale
+
+                        if train_loss_writer and job.set_name == 'train':
+                            train_loss_writer.add_summary(loss_sum, current_step)
                         #pctx.profiler.profile_operations(options=opts)
 
                         # Uncomment the next line for debugging race conditions / distributed TF
-                        log_debug('Finished %s batch step %d - loss: %f.' % (job.set_name, current_step, batch_loss))
+                        log_debug('Finished %s batch step %d - loss: %f - nonzero: %f.' % (job.set_name, current_step, batch_loss, nz_perc))
 
                         # Add batch to loss
                         total_loss += batch_loss
@@ -1895,12 +1997,14 @@ def train(server=None):
                             # Add batch to total_mean_edit_distance
                             total_mean_edit_distance += batch_report[1]
 
+                        job.sample_losses.extend([s for tower in sample_losses for s in tower])
+
                     # Gathering job results
                     job.loss = total_loss / job.steps
+
                     if job.report and FLAGS.report_wer:
                         job.mean_edit_distance = total_mean_edit_distance / job.steps
                         job.wer, job.samples = calculate_report(report_results)
-
 
                     # Send the current job to coordinator and receive the next one
                     log_debug('Sending %s...' % job)

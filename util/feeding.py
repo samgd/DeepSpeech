@@ -47,7 +47,6 @@ class ModelFeeder(object):
         self.ph_y = tf.placeholder(tf.int32, [None,None,])
         self.ph_flat_y = tf.placeholder(tf.int32, [None,])
         self.ph_y_length = tf.placeholder(tf.int32, [None,])
-        self.ph_batch_size = tf.placeholder(tf.int32, [])
         self.ph_queue_selector = tf.placeholder(tf.int32, name='Queue_Selector')
 
         self._tower_feeders = [_TowerFeeder(self, i, alphabet, dtype, logdir) for i in range(self.tower_feeder_count)]
@@ -97,8 +96,8 @@ class DataSet(object):
     is taken modulo the total number of batches.
     '''
     def __init__(self, name, csvs, target_batch_size, max_seq_len, skip=0, limit=0,
-                 ascending=False, next_index=lambda i: i + 1,
-                 shuffle_batch_order=False, shuffle_seed=1234):
+                 ascending=True, next_index=lambda i: i + 1,
+                 shuffle_batch_order=True, shuffle_first_iteration=False, shuffle_seed=1234):
 
         self.name = name
         self.target_batch_size = target_batch_size
@@ -123,8 +122,14 @@ class DataSet(object):
 
         self.current_batch = -1
         self.n_batch = 0
+
         self.shuffle_batch_order = shuffle_batch_order
         self.shuffle_seed = shuffle_seed
+        if shuffle_batch_order and shuffle_first_iteration:
+            random.seed(self.shuffle_seed)
+            self.shuffle_seed += 3
+            random.shuffle(self.batch_indices)
+
         self._lock = Lock()
 
     def _create_batch_indices(self, multiple_of=8):
@@ -162,6 +167,11 @@ class DataSet(object):
             batch_indices.append(current_batch)
 
         return batch_indices
+
+    @property
+    def mean_batch_size(self):
+        batch_lens = [len(batch) for batch in self.batch_indices]
+        return float(sum(batch_lens)) / len(batch_lens)
 
     def next_batch_indices(self):
         with self._lock:

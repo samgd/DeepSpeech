@@ -18,6 +18,8 @@ if [ ! -f "${COMPUTE_DATA_DIR}/librivox-train-clean-100.csv" ]; then
          "importer script at bin/import_librivox.py before running this script."
 fi;
 
+COMPUTE_KEEP_DIR="$HOME/efs/gradual_prune/do_test/"
+
 if [ -d "${COMPUTE_KEEP_DIR}" ]; then
     checkpoint_dir=$COMPUTE_KEEP_DIR
 else
@@ -27,28 +29,36 @@ fi
 python -u DeepSpeech.py \
   --train_files "$COMPUTE_DATA_DIR/librivox-train-clean-100.csv,$COMPUTE_DATA_DIR/librivox-train-clean-360.csv,$COMPUTE_DATA_DIR/librivox-train-other-500.csv" \
   --dev_files "$COMPUTE_DATA_DIR/librivox-dev-clean.csv" \
-  --test_files "$HOME/efs/librivox/librivox-dev-clean-apostrophe.csv" \
-  --train_batch_size 32 \
-  --dev_batch_size 32 \
-  --limit_dev 1 \
-  --notest \
+  --test_files "$COMPUTE_DATA_DIR/librivox-dev-clean.csv" \
+  --initialize_from_checkpoint "$HOME/Code/DeepSpeech/models/mixed_cudnn_checkpoint/model.ckpt-0" \
+  --noreport_wer \
+  --epoch 18 \
+  --target_batch_size 64 \
+  --max_seq_len 850 \
+  --target_learning_rate 0.00000078125 \
   --n_hidden 2048 \
   --lstm_type cudnn \
   --half_precision \
-  --loss_scale 16 \
-  --learning_rate 0.0001 \
+  --loss_scale 1.0 \
   --default_stddev 0.046875 \
+  --dropout_rate 0.2367 \
   --noearly_stop \
-  --wer_log_pattern "GLOBAL LOG: logwer('${COMPUTE_ID}', '%s', '%s', %f)" \
+  --wer_log_pattern "GLOBAL LOG: logwer('', '%s', '%s', %f)" \
   --log_level 0 \
   --display_step 0 \
-  --summary_secs 300 \
+  --summary_steps 100 \
   --summary_dir "$checkpoint_dir/summaries" \
   --checkpoint_secs 300 \
   --checkpoint_dir "$checkpoint_dir/checkpoints" \
   --report_count 10000 \
-  --max_to_keep 1 \
+  --max_to_keep 20 \
+  --use_warpctc \
+  --notest \
   --validation_step 1 \
-  --apply_mask 1 \
-  --noreport_wer \
+  --apply_mask \
+  --begin_pruning_epoch 0 \
+  --end_pruning_epoch 12 \
+  --pruning_frequency 3351  \
+  --target_sparsity 0.9 \
+  --noshuffle_train \
   "$@"
