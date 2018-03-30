@@ -27,23 +27,20 @@ fi
 python -u DeepSpeech.py \
   --train_files "$COMPUTE_DATA_DIR/librivox-train-clean-100.csv,$COMPUTE_DATA_DIR/librivox-train-clean-360.csv,$COMPUTE_DATA_DIR/librivox-train-other-500.csv" \
   --dev_files "$COMPUTE_DATA_DIR/librivox-dev-clean.csv" \
-  --test_files "$HOME/efs/librivox/librivox-dev-clean-apostrophe.csv" \
-  --test_batch_size 32 \
+  --test_files "$COMPUTE_DATA_DIR/librivox-dev-clean.csv" \
   --notrain \
-  --test \
+  --gpu_batch_size 128 \
+  --max_seq_len 850 \
   --n_hidden 2048 \
-  --wer_log_pattern "GLOBAL LOG: logwer('${COMPUTE_ID}', '%s', '%s', %f)" \
   --lstm_type cudnn \
   --half_precision \
-  --log_level 0 \
-  --display_step 0 \
-  --summary_secs 300 \
-  --summary_dir "$checkpoint_dir/summaries" \
-  --checkpoint_secs 300 \
-  --checkpoint_dir "$checkpoint_dir/checkpoints" \
-  --report_count 10000 \
+  --loss_scale 1.0 \
   --dropout_rate 0.0 \
   --noearly_stop \
-  --apply_mask 1 \
-  --noreport_wer \
+  --wer_log_pattern "GLOBAL LOG: logwer('${COMPUTE_ID}', '%s', '%s', %f)" \
+  --log_level 0 \
+  --display_step 0 \
+  --report_count 10000 \
+  --max_to_keep 0 \
+  --apply_mask \
   "$@"
