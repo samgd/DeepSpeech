@@ -96,6 +96,7 @@ tf.app.flags.DEFINE_integer ('limit_test',       0,           'maximum number of
 
 # Sparsity
 
+tf.app.flags.DEFINE_boolean ('update_masks',          False,    'update binary masks if apply_masks is true')
 tf.app.flags.DEFINE_integer ('begin_pruning_epoch',   0,        'the epoch at which to begin pruning')
 tf.app.flags.DEFINE_integer ('end_pruning_epoch',     0,        'the epoch at which to terminate pruning - 0 means use epoch')
 tf.app.flags.DEFINE_integer ('pruning_frequency',     50,       'steps per mask update')
@@ -1713,7 +1714,8 @@ def train(server=None):
     log_grads_and_vars(avg_tower_gradients)
 
     # Model pruning.
-    if FLAGS.apply_mask:
+    if FLAGS.apply_mask and FLAGS.update_masks:
+        log_debug('mask updates will occur')
         pruning_hparams = cudnn_pruning.get_pruning_hparams()
         pruning_hparams.begin_pruning_step = FLAGS.begin_pruning_epoch * model_feeder.train.total_batches
         pruning_hparams.sparsity_function_begin_step = pruning_hparams.begin_pruning_step
