@@ -8,13 +8,13 @@ _INPUT = 'input'
 def init_drop_types(hidden_keep_prob, input_keep_prob):
     dropconnect_types = []
     if hidden_keep_prob < 1.0:
-       dropconnect_types += _HIDDEN
+       dropconnect_types.append(_HIDDEN)
     if input_keep_prob < 1.0:
-       dropconnect_types += _INPUT
+       dropconnect_types.append(_INPUT)
     return dropconnect_types
 
 
-def lstm(cudnn_lstm, hidden_keep_prob, input_keep_prob=1.0, drop_bias=False, seed=None):
+def lstm(cudnn_lstm, hidden_keep_prob=1.0, input_keep_prob=1.0, drop_bias=False, seed=None):
     if not cudnn_lstm.built:
         raise ValueError('CudnnLSTM must be build before dropconnect is applied.')
 

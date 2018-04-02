@@ -24,6 +24,7 @@ from tensorflow.contrib.framework import assign_from_values
 from tensorflow.contrib.session_bundle import exporter
 from tensorflow.python.tools import freeze_graph
 from threading import Thread, Lock
+from util import cudnn_dropconnect
 from util.convert_params import get_tensors
 from util.npy_audio import audiofile_to_input_vector
 from util.feeding import DataSet, ModelFeeder
@@ -102,6 +103,11 @@ tf.app.flags.DEFINE_integer ('limit_test',       0,           'maximum number of
 
 tf.app.flags.DEFINE_boolean ('shuffle_train',       True,       'shuffle dataset after first epoch')
 tf.app.flags.DEFINE_boolean ('shuffle_first_epoch', False,      'shuffle first epoch if shuffle_train is True')
+
+# DropConnect
+
+tf.app.flags.DEFINE_float   ('hidden_keep_prob',      1.0,      'dropconnect keep probability for hidden to hidden matrices')
+tf.app.flags.DEFINE_float   ('input_keep_prob',       1.0,      'dropconnect keep probability for input to hidden matrices')
 
 # Sparsity
 
@@ -588,6 +594,11 @@ def cudnn_lstm(inputs, seq_length, dropout, is_training):
         lstm._create_saveable()
     except:
         pass
+
+    cudnn_dropconnect.lstm(lstm,
+                           hidden_keep_prob=FLAGS.hidden_keep_prob,
+                           input_keep_prob=FLAGS.input_keep_prob,
+                           seed=FLAGS.random_seed)
 
     if type(is_training) == bool:
         outputs, output_states = lstm(inputs, training=is_training)
