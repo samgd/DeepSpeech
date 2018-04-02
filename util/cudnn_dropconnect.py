@@ -29,6 +29,7 @@ def lstm(cudnn_lstm, hidden_keep_prob, input_keep_prob, drop_hidden, drop_input,
 
         keep_prob = hidden_keep_prob if elem_type == _HIDDEN else input_keep_prob
         mask = _dropconnect_mask(shape, dtype, keep_prob, seed)
+        mask = tf.div(mask, keep_prob)
         weight_masks.append(mask)
 
     passthru_biases = [tf.ones(shape, dtype)
