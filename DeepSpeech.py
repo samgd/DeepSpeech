@@ -1661,7 +1661,7 @@ class TrainingCoordinator(object):
                         self._epochs_done.append(epoch)
                         log_info('%s' % epoch)
                         # Change training set to use next data version.
-                        self._model_feeder.train.next_set()
+                        self._model_feeder.train.next_set(shuffle=FLAGS.shuffle_train)
                         self._num_jobs_train = max(1, self._model_feeder.train.total_batches // self.batches_per_job)
             else:
                 # There was no running epoch found for this job - this should never happen.
@@ -1710,12 +1710,11 @@ def train(server=None):
 
     # Reading training set
     train_set = DataSet('train',
-                        [[x] for x in FLAGS.train_files.split(',')],
+                        [train_set.split(',') for train_set in FLAGS.train_files.split('|')],
                         FLAGS.gpu_batch_size,
                         FLAGS.max_seq_len,
                         limit=FLAGS.limit_train,
                         next_index=lambda i: COORD.get_next_index('train'),
-                        shuffle_batch_order=FLAGS.shuffle_train,
                         shuffle_first_iteration=FLAGS.shuffle_first_epoch)
 
     # Reading validation set

@@ -97,7 +97,7 @@ class DataSet(object):
     '''
     def __init__(self, name, csvs, target_batch_size, max_seq_len, skip=0, limit=0,
                  ascending=True, next_index=lambda i: i + 1,
-                 shuffle_batch_order=True, shuffle_first_iteration=False, shuffle_seed=1234):
+                 shuffle_first_iteration=False, shuffle_seed=1234):
 
         self.name = name
         self.target_batch_size = target_batch_size
@@ -130,22 +130,21 @@ class DataSet(object):
         self.current_batch = -1
         self.n_batch = 0
 
-        self.next_set()
-
-        self.shuffle_batch_order = shuffle_batch_order
         self.shuffle_seed = shuffle_seed
-        if shuffle_batch_order and shuffle_first_iteration:
-            random.seed(self.shuffle_seed)
-            self.shuffle_seed += 3
-            random.shuffle(self.batch_indices)
+
+        self.next_set(shuffle=shuffle_first_iteration)
 
         self._lock = Lock()
 
-    def next_set(self):
+    def next_set(self, shuffle=True):
         self.current_set = (self.current_set + 1) % len(self.file_sets)
         self.files = self.file_sets[self.current_set]
         self.batch_indices = self.batch_index_sets[self.current_set]
         self.total_batches = self.total_batch_sets[self.current_set]
+        if shuffle:
+            random.seed(self.shuffle_seed)
+            self.shuffle_seed += 3
+            random.shuffle(self.batch_indices)
 
     def _create_batch_indices(self, multiple_of=8):
         '''Return a list of groups (lists) of batch indices into self.files.
@@ -199,13 +198,8 @@ class DataSet(object):
                 return None
 
             if idx >= self.total_batches:
-                if (not self.total_batches or
-                        (self.n_batch % self.total_batches == 0
-                         and self.shuffle_batch_order)):
-                    random.seed(self.shuffle_seed)
-                    self.shuffle_seed += 3
-                    random.shuffle(self.batch_indices)
                 return []
+
             self.n_batch += 1
             next_batch = self.batch_indices[idx]
             self.current_batch = idx
