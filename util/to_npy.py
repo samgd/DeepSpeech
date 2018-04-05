@@ -29,8 +29,8 @@ def shrink(audio_filename, numcep=26, numcontext=9):
     features = features.astype(np.float16)
     return features
 
-in_dir = "/home/ubuntu/Code/DeepSpeech/data/librivox/"
-out_dir = "/home/ubuntu/npy_data/"
+in_dir = "/home/ubuntu/librivox/"
+out_dir = "/home/ubuntu/npy_data/pitch_tempo/gen_1"
 tmp_file = "/tmp/data_aug.wav"
 
 csv_files = ['librivox-train-clean-100.csv',
@@ -53,20 +53,22 @@ for csv_file in csv_files:
 
         with open(csv_in_file) as csv_handle:
             csv_data = csv.reader(csv_handle, delimiter=',')
-            writer.writerow(csv_data.next())
+            writer.writerow([''] + csv_data.next() + ['seq_len', 'shift_tempo', 'shift_pitch'])
 
             for i, row in enumerate(csv_data):
                 tfm = sox.Transformer()
-                tfm.tempo(random.uniform(*tempo_bounds))
-                tfm.pitch(random.uniform(*pitch_bounds))
+                shift_tempo = random.uniform(*tempo_bounds)
+                shift_pitch = random.uniform(*pitch_bounds)
+                tfm.tempo(shift_tempo)
+                tfm.pitch(shift_pitch)
                 tfm.build(row[0], tmp_file)
 
-                print(row)
                 features = shrink(tmp_file)
+                os.remove(tmp_file)
 
                 base, _ = os.path.splitext(row[0])
                 base = base[len(in_dir):]
                 base = os.path.join(out_dir, base)
                 mkdir_p(os.path.dirname(base))
                 np.save(base, features)
-                writer.writerow([str(i), base + '.npy', row[1], row[2]])
+                writer.writerow([str(i), base + '.npy', row[1], row[2], len(features), shift_tempo, shift_pitch])
