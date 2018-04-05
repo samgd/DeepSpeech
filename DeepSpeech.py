@@ -1385,6 +1385,7 @@ class TrainingCoordinator(object):
 
             # Number of batches processed per job per worker
             batches_per_job  = gpus_per_worker * max(1, FLAGS.iters_per_worker)
+            self.batches_per_job = batches_per_job
 
             # Number of batches per global step
             batches_per_step = gpus_per_worker * max(1, FLAGS.replicas_to_agg)
@@ -1659,6 +1660,9 @@ class TrainingCoordinator(object):
                         self._epochs_running.remove(epoch)
                         self._epochs_done.append(epoch)
                         log_info('%s' % epoch)
+                        # Change training set to use next data version.
+                        self._model_feeder.train.next_set()
+                        self._num_jobs_train = max(1, self._model_feeder.train.total_batches // self.batches_per_job)
             else:
                 # There was no running epoch found for this job - this should never happen.
                 log_error('There is no running epoch of ID %d for job with ID %d. This should never happen.' % (job.epoch_id, job.id))
@@ -1706,7 +1710,7 @@ def train(server=None):
 
     # Reading training set
     train_set = DataSet('train',
-                        FLAGS.train_files.split(','),
+                        [[x] for x in FLAGS.train_files.split(',')],
                         FLAGS.gpu_batch_size,
                         FLAGS.max_seq_len,
                         limit=FLAGS.limit_train,
@@ -1716,7 +1720,7 @@ def train(server=None):
 
     # Reading validation set
     dev_set = DataSet('dev',
-                      FLAGS.dev_files.split(','),
+                      [FLAGS.dev_files.split(',')],
                       FLAGS.gpu_batch_size,
                       FLAGS.max_seq_len,
                       limit=FLAGS.limit_dev,
@@ -1724,7 +1728,7 @@ def train(server=None):
 
     # Reading test set
     test_set = DataSet('test',
-                       FLAGS.test_files.split(','),
+                       [FLAGS.test_files.split(',')],
                        FLAGS.gpu_batch_size,
                        FLAGS.max_seq_len,
                        limit=FLAGS.limit_test,

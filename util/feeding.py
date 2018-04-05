@@ -104,24 +104,33 @@ class DataSet(object):
         self.max_seq_len = max_seq_len
 
         self.next_index = next_index
+
         self.files = None
-        for csv in csvs:
-            file = pandas.read_csv(csv, encoding='utf-8')
-            if self.files is None:
-                self.files = file
-            else:
-                self.files = self.files.append(file)
-        self.files = self.files.sort_values(by="seq_len", ascending=ascending) \
+        self.file_sets = []
+
+        for set_csvs in csvs:
+            files = None
+            for csv in set_csvs:
+                file = pandas.read_csv(csv, encoding='utf-8')
+                if files is None:
+                    files = file
+                else:
+                    files = files.append(file)
+            files = files.sort_values(by="seq_len", ascending=ascending) \
                          .ix[:, ["wav_filename", "transcript", "seq_len"]] \
                          .values[skip:]
-        if limit > 0:
-            self.files = self.files[:limit]
+            if limit > 0:
+                files = files[:limit]
+            self.file_sets.append(files)
 
-        self.batch_indices = self._create_batch_indices()
-        self.total_batches = len(self.batch_indices)
+        self.batch_index_sets = self._create_batch_indices()
+        self.total_batch_sets = [len(batch_indices) for batch_indices in self.batch_index_sets]
 
+        self.current_set = -1
         self.current_batch = -1
         self.n_batch = 0
+
+        self.next_set()
 
         self.shuffle_batch_order = shuffle_batch_order
         self.shuffle_seed = shuffle_seed
@@ -131,6 +140,12 @@ class DataSet(object):
             random.shuffle(self.batch_indices)
 
         self._lock = Lock()
+
+    def next_set(self):
+        self.current_set = (self.current_set + 1) % len(self.file_sets)
+        self.files = self.file_sets[self.current_set]
+        self.batch_indices = self.batch_index_sets[self.current_set]
+        self.total_batches = self.total_batch_sets[self.current_set]
 
     def _create_batch_indices(self, multiple_of=8):
         '''Return a list of groups (lists) of batch indices into self.files.
@@ -142,31 +157,35 @@ class DataSet(object):
             multiple_of: Each batch will be a multiple_of this number, except
                 if there are too few elements.
         '''
-        batch_indices = []
+        batch_index_sets = []
+        for files in self.file_sets:
+            batch_indices = []
 
-        max_batch_values = self.target_batch_size * self.max_seq_len
-        current_batch = []
-        current_batch_lens = []
-        current_batch_len = 0
-        for i, row in enumerate(self.files):
-            if current_batch_len + row[2] > max_batch_values:
-                # Ensure batch is a multiple of the desired number
-                split = (len(current_batch) // multiple_of) * multiple_of
-                batch_multiple_of = current_batch[:split]
-                if batch_multiple_of: 
-                    batch_indices.append(batch_multiple_of)
-                current_batch = current_batch[split:]
-                current_batch_lens = current_batch_lens[split:]
-                current_batch_len = sum(current_batch_lens)
+            max_batch_values = self.target_batch_size * self.max_seq_len
+            current_batch = []
+            current_batch_lens = []
+            current_batch_len = 0
+            for i, row in enumerate(files):
+                if current_batch_len + row[2] > max_batch_values:
+                    # Ensure batch is a multiple of the desired number
+                    split = (len(current_batch) // multiple_of) * multiple_of
+                    batch_multiple_of = current_batch[:split]
+                    if batch_multiple_of:
+                        batch_indices.append(batch_multiple_of)
+                    current_batch = current_batch[split:]
+                    current_batch_lens = current_batch_lens[split:]
+                    current_batch_len = sum(current_batch_lens)
 
-            current_batch.append(i)
-            current_batch_lens.append(row[2])
-            current_batch_len += row[2]
+                current_batch.append(i)
+                current_batch_lens.append(row[2])
+                current_batch_len += row[2]
 
-        if current_batch:
-            batch_indices.append(current_batch)
+            if current_batch:
+                batch_indices.append(current_batch)
 
-        return batch_indices
+            batch_index_sets.append(batch_indices)
+
+        return batch_index_sets
 
     @property
     def mean_batch_size(self):
