@@ -1661,8 +1661,9 @@ class TrainingCoordinator(object):
                         self._epochs_done.append(epoch)
                         log_info('%s' % epoch)
                         # Change training set to use next data version.
-                        self._model_feeder.train.next_set(shuffle=FLAGS.shuffle_train)
-                        self._num_jobs_train = max(1, self._model_feeder.train.total_batches // self.batches_per_job)
+                        if epoch.set_name == 'train':
+                            self._model_feeder.train.next_set(shuffle=FLAGS.shuffle_train)
+                            self._num_jobs_train = max(1, self._model_feeder.train.total_batches // self.batches_per_job)
             else:
                 # There was no running epoch found for this job - this should never happen.
                 log_error('There is no running epoch of ID %d for job with ID %d. This should never happen.' % (job.epoch_id, job.id))

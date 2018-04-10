@@ -145,6 +145,7 @@ class DataSet(object):
             random.seed(self.shuffle_seed)
             self.shuffle_seed += 3
             random.shuffle(self.batch_indices)
+        print('%s: switching to set %d' % (self.name, self.current_set))
 
     def _create_batch_indices(self, multiple_of=8):
         '''Return a list of groups (lists) of batch indices into self.files.
