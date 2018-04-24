@@ -24,6 +24,7 @@ from tensorflow.contrib.framework import assign_from_values
 from tensorflow.contrib.session_bundle import exporter
 from tensorflow.python.tools import freeze_graph
 from threading import Thread, Lock
+from util import cudnn_dropconnect
 from util.convert_params import get_tensors
 from util.npy_audio import audiofile_to_input_vector
 from util.feeding import DataSet, ModelFeeder
@@ -102,6 +103,11 @@ tf.app.flags.DEFINE_integer ('limit_test',       0,           'maximum number of
 
 tf.app.flags.DEFINE_boolean ('shuffle_train',       True,       'shuffle dataset after first epoch')
 tf.app.flags.DEFINE_boolean ('shuffle_first_epoch', False,      'shuffle first epoch if shuffle_train is True')
+
+# DropConnect
+
+tf.app.flags.DEFINE_float   ('hidden_keep_prob',      1.0,      'dropconnect keep probability for hidden to hidden matrices')
+tf.app.flags.DEFINE_float   ('input_keep_prob',       1.0,      'dropconnect keep probability for input to hidden matrices')
 
 # Sparsity
 
@@ -272,6 +278,12 @@ def initialize_globals():
                    tf.placeholder(precision, shape=[], name='dropout_rate4'),
                    tf.placeholder(precision, shape=[], name='dropout_rate5'),
                    tf.placeholder(precision, shape=[], name='dropout_rate6') ]
+
+    global ph_hidden_keep_prob
+    ph_hidden_keep_prob = tf.placeholder(precision, shape=[], name='hidden_keep_prob')
+
+    global ph_input_keep_prob
+    ph_input_keep_prob = tf.placeholder(precision, shape=[], name='input_keep_prob')
 
     # Set default checkpoint dir
     if len(FLAGS.checkpoint_dir) == 0:
@@ -444,7 +456,7 @@ def variable_on_worker_level(name, shape, initializer):
     return var
 
 
-def BiRNN(batch_x, seq_length, dropout, is_training):
+def BiRNN(batch_x, seq_length, dropout, hidden_keep_prob, input_keep_prob, is_training):
     r'''
     That done, we will define the learned variables, the weights and biases,
     within the method ``BiRNN()`` which also constructs the neural network.
@@ -504,7 +516,7 @@ def BiRNN(batch_x, seq_length, dropout, is_training):
     if FLAGS.lstm_type == 'basic':
         outputs = basic_lstm(layer_3, seq_length, dropout)
     elif FLAGS.lstm_type == 'cudnn':
-        outputs = cudnn_lstm(layer_3, seq_length, dropout, is_training)
+        outputs = cudnn_lstm(layer_3, seq_length, dropout, hidden_keep_prob, input_keep_prob, is_training)
     else:
         log_error('Unknown lstm_type %s' % FLAGS.lstm_type)
 
@@ -564,7 +576,7 @@ def _unsafe_cudnn_rnn_backward(op, *grad):
         input_mode=op.get_attr("input_mode"),
         direction=op.get_attr("direction"))
 
-def cudnn_lstm(inputs, seq_length, dropout, is_training):
+def cudnn_lstm(inputs, seq_length, dropout, hidden_keep_prob, input_keep_prob, is_training):
     inputs = tf.nn.dropout(inputs, (1.0 - dropout[4]))
 
     # Note that there is a dropout parameter, but it is "applied between layers
@@ -588,6 +600,13 @@ def cudnn_lstm(inputs, seq_length, dropout, is_training):
         lstm._create_saveable()
     except:
         pass
+
+    cudnn_dropconnect.lstm(lstm,
+                           hidden_keep_prob=hidden_keep_prob,
+                           input_keep_prob=input_keep_prob,
+                           drop_hidden=FLAGS.hidden_keep_prob < 1.0,
+                           drop_input=FLAGS.input_keep_prob < 1.0,
+                           seed=FLAGS.random_seed)
 
     if type(is_training) == bool:
         outputs, output_states = lstm(inputs, training=is_training)
@@ -668,7 +687,7 @@ def decode_with_lm(inputs, sequence_length, beam_width=100,
 # Conveniently, this loss function is implemented in TensorFlow.
 # Thus, we can simply make use of this implementation to define our loss.
 
-def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_training):
+def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, hidden_keep_prob, input_keep_prob, is_training):
     r'''
     This routine beam search decodes a mini-batch and calculates the loss and mean edit distance.
     Next to total and average loss it returns the mean edit distance,
@@ -688,10 +707,10 @@ def calculate_mean_edit_distance_and_loss(model_feeder, tower, dropout, is_train
         with tf.variable_scope('fp32_storage',
                                dtype=precision,
                                custom_getter=float32_variable_storage_getter):
-            logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
+            logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, hidden_keep_prob, input_keep_prob, is_training)
         logits = tf.cast(logits, tf.float32)
     else:
-        logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, is_training)
+        logits = BiRNN(batch_x, tf.to_int64(batch_seq_len), dropout, hidden_keep_prob, input_keep_prob, is_training)
 
     # Compute the CTC loss using either TensorFlow's `ctc_loss` or Baidu's `warp_ctc_loss`.
     if FLAGS.use_warpctc:
@@ -822,7 +841,7 @@ def get_tower_results(model_feeder, is_training):
                     # Calculate the avg_loss and mean_edit_distance and retrieve the decoded
                     # batch along with the original batch's labels (Y) of this tower
                     total_loss, sum_loss, distance, mean_edit_distance, decoded, labels = \
-                        calculate_mean_edit_distance_and_loss(model_feeder, i, dropout_param, is_training)
+                        calculate_mean_edit_distance_and_loss(model_feeder, i, dropout_param, ph_hidden_keep_prob, ph_input_keep_prob, is_training)
 
                     # Allow for variables to be re-used by the next tower
                     tf.get_variable_scope().reuse_variables()
@@ -1960,9 +1979,13 @@ def train(server=None):
                     # So far the only extra parameter is the feed_dict
                     if job.set_name == 'train':
                         feed_dict.update(zip(ph_dropout, train_dropout_rates))
+                        feed_dict.update([(ph_hidden_keep_prob, FLAGS.hidden_keep_prob),
+                                          (ph_input_keep_prob, FLAGS.input_keep_prob)])
                         run_update_mask = mask_update_op
                     else:
                         feed_dict.update(zip(ph_dropout, no_dropout))
+                        feed_dict.update([(ph_hidden_keep_prob, 1.0),
+                                          (ph_input_keep_prob, 1.0)])
                         run_update_mask = []
                     extra_params = { 'feed_dict': feed_dict }
 
